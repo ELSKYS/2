@@ -64,8 +64,15 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 
 // ==================== 新 Ticket 自动发送产品价格 + 地址 ====================
 client.on('channelCreate', async channel => {
-    // 只处理以 ticket- 开头的文字频道
-    if (channel.name.startsWith('ticket-') && channel.type === ChannelType.GuildText) {
+    // 匹配你当前的工单命名格式
+    const isTicketChannel = 
+        channel.type === ChannelType.GuildText &&
+        (
+            channel.name.includes('Support / Questions') || 
+            channel.name.includes('Purchase')
+        );
+
+    if (isTicketChannel) {
         try {
             // 构建产品价格列表
             let productList = '';
