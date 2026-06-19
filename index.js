@@ -1,8 +1,9 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, REST, Routes } = require('discord.js');
 const Database = require('better-sqlite3');
 
 const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID; // 需要在 Railway 添加这个变量
 
 const client = new Client({
     intents: [
@@ -61,8 +62,50 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 \`\`\`
 `;
 
-client.once('clientReady', () => {
+// ==================== 注册命令 ====================
+async function registerCommands() {
+    const commands = [
+        {
+            name: 'buy',
+            description: 'View RED DMA products and create a purchase ticket',
+        },
+        {
+            name: 'announce',
+            description: 'Send an announcement (Admin only)',
+            options: [
+                {
+                    name: 'message',
+                    description: 'The announcement message',
+                    type: 3, // STRING
+                    required: true,
+                },
+                {
+                    name: 'image',
+                    description: 'Optional image to attach',
+                    type: 11, // ATTACHMENT
+                    required: false,
+                }
+            ]
+        }
+    ];
+
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+    try {
+        console.log('Registering slash commands...');
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commands },
+        );
+        console.log('✅ Slash commands registered successfully!');
+    } catch (error) {
+        console.error('Failed to register commands:', error);
+    }
+}
+
+client.once('clientReady', async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
+    await registerCommands(); // 启动时自动注册命令
 });
 
 client.on('interactionCreate', async interaction => {
@@ -128,7 +171,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `Ticket created: ${ticketChannel}`, ephemeral: true });
     }
 
-    // /announce 命令（管理员发布通知）
+    // /announce 命令
     if (interaction.isChatInputCommand() && interaction.commandName === 'announce') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
