@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, But
 const Database = require('better-sqlite3');
 
 const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // 需要在 Railway 添加这个变量
+const CLIENT_ID = process.env.CLIENT_ID;
 
 const client = new Client({
     intents: [
@@ -12,7 +12,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
     ],
-    partials: [Partials.Channel]
+    partials: [Partials.Channel, Partials.GuildMember]
 });
 
 const db = new Database('sales.db');
@@ -62,6 +62,28 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 \`\`\`
 `;
 
+// ==================== 新成员加入自动私信 ====================
+client.on('guildMemberAdd', async member => {
+    try {
+        const welcomeEmbed = new EmbedBuilder()
+            .setTitle('Welcome to RED DMA!')
+            .setDescription(
+                `Thank you for joining **RED DMA • Premium DMA Firmware**.\n\n` +
+                `Please take a moment to read and follow the **server rules**.\n\n` +
+                `You can also visit our website:\n` +
+                `**https://reddma.xyz**\n\n` +
+                `If you have any questions, feel free to open a ticket.`
+            )
+            .setColor('#ef4444')
+            .setTimestamp();
+
+        await member.send({ embeds: [welcomeEmbed] });
+        console.log(`Sent welcome DM to ${member.user.tag}`);
+    } catch (error) {
+        console.log(`Could not send DM to ${member.user.tag} (DMs might be closed)`);
+    }
+});
+
 // ==================== 注册命令 ====================
 async function registerCommands() {
     const commands = [
@@ -76,13 +98,13 @@ async function registerCommands() {
                 {
                     name: 'message',
                     description: 'The announcement message',
-                    type: 3, // STRING
+                    type: 3,
                     required: true,
                 },
                 {
                     name: 'image',
                     description: 'Optional image to attach',
-                    type: 11, // ATTACHMENT
+                    type: 11,
                     required: false,
                 }
             ]
@@ -93,10 +115,7 @@ async function registerCommands() {
 
     try {
         console.log('Registering slash commands...');
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commands },
-        );
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('✅ Slash commands registered successfully!');
     } catch (error) {
         console.error('Failed to register commands:', error);
@@ -105,7 +124,7 @@ async function registerCommands() {
 
 client.once('clientReady', async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
-    await registerCommands(); // 启动时自动注册命令
+    await registerCommands();
 });
 
 client.on('interactionCreate', async interaction => {
