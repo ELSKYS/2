@@ -1,8 +1,9 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, REST, Routes } = require('discord.js');
 const Database = require('better-sqlite3');
 
 const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID; // 需要在 Railway Variables 里添加
 
 const client = new Client({
     intents: [
@@ -34,16 +35,36 @@ const products = [
     { id: 3, name: "EAC Rank", price: "$369", desc: "支持排位和杯赛" },
 ];
 
-// 全局错误捕获
-process.on('unhandledRejection', error => {
-    console.error('未处理的 Promise 拒绝:', error);
-});
-process.on('uncaughtException', error => {
-    console.error('未捕获的异常:', error);
-});
+// 注册斜杠命令
+async function registerCommands() {
+    const commands = [
+        {
+            name: 'products',
+            description: '查看 RED DMA 商品列表',
+        },
+    ];
 
-client.once('ready', () => {
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+    try {
+        console.log('开始注册斜杠命令...');
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commands },
+        );
+        console.log('✅ 斜杠命令注册成功！');
+    } catch (error) {
+        console.error('注册命令失败:', error);
+    }
+}
+
+// 全局错误捕获
+process.on('unhandledRejection', error => console.error('未处理的 Promise 拒绝:', error));
+process.on('uncaughtException', error => console.error('未捕获的异常:', error));
+
+client.once('clientReady', async () => {
     console.log(`✅ 机器人已成功上线：${client.user.tag}`);
+    await registerCommands(); // 启动时注册命令
 });
 
 client.on('messageCreate', message => {
@@ -99,6 +120,4 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-client.login(TOKEN).catch(err => {
-    console.error('登录失败:', err);
-});
+client.login(TOKEN).catch(err => console.error('登录失败:', err));
