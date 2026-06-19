@@ -62,7 +62,37 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 \`\`\`
 `;
 
-// ==================== 新成员加入自动私信 ====================
+// ==================== 新 Ticket 自动发送产品价格 + 地址 ====================
+client.on('channelCreate', async channel => {
+    // 只处理以 ticket- 开头的文字频道
+    if (channel.name.startsWith('ticket-') && channel.type === ChannelType.GuildText) {
+        try {
+            // 构建产品价格列表
+            let productList = '';
+            products.forEach(p => {
+                productList += `**${p.name}** — ${p.price}\n${p.desc}\n\n`;
+            });
+
+            const priceEmbed = new EmbedBuilder()
+                .setTitle('RED DMA Product Price List')
+                .setDescription(productList)
+                .setColor('#ef4444');
+
+            const paymentEmbed = new EmbedBuilder()
+                .setTitle('💰 Payment Addresses')
+                .setDescription(paymentInfo)
+                .setColor('#ef4444')
+                .setFooter({ text: 'After payment, please upload your transaction screenshot. We will process it as soon as possible.' });
+
+            await channel.send({ embeds: [priceEmbed, paymentEmbed] });
+            console.log(`Sent product & payment info to new ticket: ${channel.name}`);
+        } catch (error) {
+            console.error('Failed to send info to ticket channel:', error);
+        }
+    }
+});
+
+// ==================== 新成员欢迎私信 ====================
 client.on('guildMemberAdd', async member => {
     try {
         const welcomeEmbed = new EmbedBuilder()
@@ -78,9 +108,8 @@ client.on('guildMemberAdd', async member => {
             .setTimestamp();
 
         await member.send({ embeds: [welcomeEmbed] });
-        console.log(`Sent welcome DM to ${member.user.tag}`);
     } catch (error) {
-        console.log(`Could not send DM to ${member.user.tag} (DMs might be closed)`);
+        console.log(`Could not send DM to ${member.user.tag}`);
     }
 });
 
@@ -128,7 +157,6 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    // /buy 命令
     if (interaction.isChatInputCommand() && interaction.commandName === 'buy') {
         const embed = new EmbedBuilder()
             .setTitle('RED DMA Product List')
@@ -153,7 +181,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
     }
 
-    // 购买按钮逻辑
     if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
         const productId = parseInt(interaction.customId.split('_')[1]);
         const product = products.find(p => p.id === productId);
@@ -190,7 +217,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `Ticket created: ${ticketChannel}`, ephemeral: true });
     }
 
-    // /announce 命令
     if (interaction.isChatInputCommand() && interaction.commandName === 'announce') {
         if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
