@@ -44,7 +44,7 @@ const products = [
     { id: 13, name: "RDMA Month Card", price: "$200", desc: "RDMA 月卡（支持 VGK/EAC/BE 等）" },
 ];
 
-// ==================== 收款地址 ====================
+// 收款地址
 const paymentInfo = `
 **LTC（莱特币）**
 \`\`\`
@@ -61,7 +61,6 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 7a4Xt6piGZqyeQFPdTo7JgxFyRp98aajwEcLgcjTkAB4
 \`\`\`
 `;
-// ===============================================
 
 client.once('clientReady', () => {
     console.log(`✅ 机器人已成功上线：${client.user.tag}`);
@@ -74,17 +73,23 @@ client.on('interactionCreate', async interaction => {
             .setDescription('点击下方按钮创建购买工单')
             .setColor('#ef4444');
 
-        const row = new ActionRowBuilder();
-        products.forEach(p => {
-            row.addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`buy_${p.id}`)
-                    .setLabel(`${p.name} - ${p.price}`)
-                    .setStyle(ButtonStyle.Success)
-            );
-        });
+        // 自动分成多行，每行最多 5 个按钮
+        const rows = [];
+        for (let i = 0; i < products.length; i += 5) {
+            const row = new ActionRowBuilder();
+            const chunk = products.slice(i, i + 5);
+            chunk.forEach(p => {
+                row.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`buy_${p.id}`)
+                        .setLabel(`${p.name} - ${p.price}`)
+                        .setStyle(ButtonStyle.Success)
+                );
+            });
+            rows.push(row);
+        }
 
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+        await interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
@@ -92,7 +97,6 @@ client.on('interactionCreate', async interaction => {
         const product = products.find(p => p.id === productId);
         if (!product) return;
 
-        // 创建 Ticket 频道
         const ticketChannel = await interaction.guild.channels.create({
             name: `ticket-${interaction.user.username}`,
             type: ChannelType.GuildText,
@@ -102,7 +106,6 @@ client.on('interactionCreate', async interaction => {
             ]
         });
 
-        // 记录到数据库
         db.prepare('INSERT INTO tickets (ticket_id, user_id, product_name) VALUES (?, ?, ?)').run(
             ticketChannel.id, interaction.user.id, product.name
         );
