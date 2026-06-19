@@ -73,9 +73,15 @@ client.on('messageCreate', async message => {
         channelName.includes('Support / Questions') || 
         channelName.includes('Purchase');
 
-    // 只在工单频道里，且是用户发的第一条消息时触发
-    if (isTicketChannel && message.channel.messages.cache.size <= 2) {
-        try {
+    if (!isTicketChannel) return;
+
+    try {
+        // 真实获取频道里的消息（更准确）
+        const fetchedMessages = await message.channel.messages.fetch({ limit: 10 });
+        const userMessages = fetchedMessages.filter(m => !m.author.bot);
+
+        // 只在用户发的第一条消息时触发
+        if (userMessages.size === 1) {
             let productList = '';
             products.forEach(p => {
                 productList += `**${p.name}** — ${p.price}\n${p.desc}\n\n`;
@@ -94,12 +100,11 @@ client.on('messageCreate', async message => {
 
             await message.channel.send({ embeds: [priceEmbed, paymentEmbed] });
             console.log(`Sent product info in ticket: ${channelName}`);
-        } catch (error) {
-            console.error('Failed to send product info:', error);
         }
+    } catch (error) {
+        console.error('Failed to send product info:', error);
     }
 });
-
 // ==================== 新成员欢迎私信 ====================
 client.on('guildMemberAdd', async member => {
     try {
