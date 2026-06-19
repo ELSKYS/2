@@ -28,52 +28,50 @@ db.exec(`
 `);
 
 const products = [
-    { id: 0, name: "Universal", price: "$600", desc: "支持 EAC / VGK / BE 等，终身 + 1个月保修" },
-    { id: 1, name: "Universal PRO", price: "$800", desc: "全游戏支持，终身 + 1个月保修" },
-    { id: 2, name: "Specific Anti-Cheat (6个月保)", price: "$150", desc: "支持 BE, Javelin, GC, VAC 等" },
-    { id: 3, name: "Specific Anti-Cheat (1年保)", price: "$250", desc: "支持 BE, Javelin, GC, VAC 等" },
-    { id: 4, name: "EAC Basic", price: "$169", desc: "Rust / Apex / FN（无排位杯赛），终身 + 1个月保修" },
-    { id: 5, name: "EAC Rank", price: "$369", desc: "FN 排位和杯赛支持，终身 + 1个月保修" },
-    { id: 6, name: "Faceit (无保修)", price: "$200", desc: "Faceit 无保修版本" },
-    { id: 7, name: "Faceit (1个月保修)", price: "$500", desc: "Faceit 带1个月保修" },
-    { id: 8, name: "VGK", price: "$300", desc: "VGK，终身 + 1个月保修" },
-    { id: 9, name: "Hidden (6个月保)", price: "$150", desc: "FiveM & Free Fire 隐藏版" },
-    { id: 10, name: "Hidden (12个月保)", price: "$250", desc: "FiveM & Free Fire 隐藏版" },
-    { id: 11, name: "RDMA Day Card", price: "$10", desc: "RDMA 日卡（支持 VGK/EAC/BE 等）" },
-    { id: 12, name: "RDMA Week Card", price: "$60", desc: "RDMA 周卡（支持 VGK/EAC/BE 等）" },
-    { id: 13, name: "RDMA Month Card", price: "$200", desc: "RDMA 月卡（支持 VGK/EAC/BE 等）" },
+    { id: 0, name: "Universal", price: "$600", desc: "Supports EAC / VGK / BE etc. Lifetime + 1 Month Warranty" },
+    { id: 1, name: "Universal PRO", price: "$800", desc: "All games supported. Lifetime + 1 Month Warranty" },
+    { id: 2, name: "Specific Anti-Cheat (6 Months)", price: "$150", desc: "Supports BE, Javelin, GC, VAC etc." },
+    { id: 3, name: "Specific Anti-Cheat (1 Year)", price: "$250", desc: "Supports BE, Javelin, GC, VAC etc." },
+    { id: 4, name: "EAC Basic", price: "$169", desc: "Rust / Apex / FN (No Rank/Cup). Lifetime + 1 Month Warranty" },
+    { id: 5, name: "EAC Rank", price: "$369", desc: "FN Ranked & Cup support. Lifetime + 1 Month Warranty" },
+    { id: 6, name: "Faceit (No Warranty)", price: "$200", desc: "Faceit without warranty" },
+    { id: 7, name: "Faceit (1 Month Warranty)", price: "$500", desc: "Faceit with 1 month warranty" },
+    { id: 8, name: "VGK", price: "$300", desc: "VGK. Lifetime + 1 Month Warranty" },
+    { id: 9, name: "Hidden (6 Months)", price: "$150", desc: "FiveM & Free Fire hidden version" },
+    { id: 10, name: "Hidden (12 Months)", price: "$250", desc: "FiveM & Free Fire hidden version" },
+    { id: 11, name: "RDMA Day Card", price: "$10", desc: "RDMA Day Card (Supports VGK/EAC/BE etc.)" },
+    { id: 12, name: "RDMA Week Card", price: "$60", desc: "RDMA Week Card (Supports VGK/EAC/BE etc.)" },
+    { id: 13, name: "RDMA Month Card", price: "$200", desc: "RDMA Month Card (Supports VGK/EAC/BE etc.)" },
 ];
 
-// 收款地址
 const paymentInfo = `
-**LTC（莱特币）**
+**LTC (Litecoin)**
 \`\`\`
 ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 \`\`\`
 
-**BTC（比特币）**
+**BTC (Bitcoin)**
 \`\`\`
 3LHYderrTnSYK34ME6cHneR6cBQUU7PEYE
 \`\`\`
 
-**SOL（Solana）**
+**SOL (Solana)**
 \`\`\`
 7a4Xt6piGZqyeQFPdTo7JgxFyRp98aajwEcLgcjTkAB4
 \`\`\`
 `;
 
 client.once('clientReady', () => {
-    console.log(`✅ 机器人已成功上线：${client.user.tag}`);
+    console.log(`✅ Bot is online: ${client.user.tag}`);
 });
 
 client.on('interactionCreate', async interaction => {
-    if (interaction.isChatInputCommand() && interaction.commandName === 'products') {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'buy') {
         const embed = new EmbedBuilder()
-            .setTitle('RED DMA 完整产品列表')
-            .setDescription('点击下方按钮创建购买工单')
+            .setTitle('RED DMA Product List')
+            .setDescription('Click the buttons below to create a purchase ticket.')
             .setColor('#ef4444');
 
-        // 自动分成多行，每行最多 5 个按钮
         const rows = [];
         for (let i = 0; i < products.length; i += 5) {
             const row = new ActionRowBuilder();
@@ -110,25 +108,23 @@ client.on('interactionCreate', async interaction => {
             ticketChannel.id, interaction.user.id, product.name
         );
 
-        // 发送订单信息
         const orderEmbed = new EmbedBuilder()
-            .setTitle(`订单：${product.name} (${product.price})`)
-            .setDescription(`${product.desc}\n\n请按照下方地址付款，付款后上传截图。`)
+            .setTitle(`Order: ${product.name} (${product.price})`)
+            .setDescription(`${product.desc}\n\nPlease pay using the addresses below and upload your payment screenshot.`)
             .setColor('#ef4444');
 
-        await ticketChannel.send({ content: `<@${interaction.user.id}> 欢迎！您的订单已创建。`, embeds: [orderEmbed] });
+        await ticketChannel.send({ content: `<@${interaction.user.id}> Welcome! Your order has been created.`, embeds: [orderEmbed] });
 
-        // 发送收款地址
         const paymentEmbed = new EmbedBuilder()
-            .setTitle('💰 收款地址（请复制后付款）')
+            .setTitle('💰 Payment Addresses')
             .setDescription(paymentInfo)
             .setColor('#ef4444')
-            .setFooter({ text: '付款后请上传交易截图，我们会尽快处理' });
+            .setFooter({ text: 'After payment, please upload the transaction screenshot.' });
 
         await ticketChannel.send({ embeds: [paymentEmbed] });
 
-        await interaction.reply({ content: `工单已创建：${ticketChannel}`, ephemeral: true });
+        await interaction.reply({ content: `Ticket created: ${ticketChannel}`, ephemeral: true });
     }
 });
 
-client.login(TOKEN).catch(err => console.error('登录失败:', err));
+client.login(TOKEN).catch(err => console.error('Login failed:', err));
