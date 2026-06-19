@@ -66,6 +66,7 @@ client.once('clientReady', () => {
 });
 
 client.on('interactionCreate', async interaction => {
+    // /buy 命令
     if (interaction.isChatInputCommand() && interaction.commandName === 'buy') {
         const embed = new EmbedBuilder()
             .setTitle('RED DMA Product List')
@@ -90,6 +91,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
     }
 
+    // 购买按钮逻辑
     if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
         const productId = parseInt(interaction.customId.split('_')[1]);
         const product = products.find(p => p.id === productId);
@@ -124,6 +126,28 @@ client.on('interactionCreate', async interaction => {
         await ticketChannel.send({ embeds: [paymentEmbed] });
 
         await interaction.reply({ content: `Ticket created: ${ticketChannel}`, ephemeral: true });
+    }
+
+    // /announce 命令（管理员发布通知）
+    if (interaction.isChatInputCommand() && interaction.commandName === 'announce') {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+        }
+
+        const message = interaction.options.getString('message');
+        const image = interaction.options.getAttachment('image');
+
+        const announceEmbed = new EmbedBuilder()
+            .setDescription(message)
+            .setColor('#ef4444')
+            .setTimestamp();
+
+        if (image) {
+            announceEmbed.setImage(image.url);
+        }
+
+        await interaction.channel.send({ embeds: [announceEmbed] });
+        await interaction.reply({ content: 'Announcement sent successfully.', ephemeral: true });
     }
 });
 
