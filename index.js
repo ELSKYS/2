@@ -62,19 +62,20 @@ ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
 \`\`\`
 `;
 
-// ==================== 新 Ticket 自动发送产品价格 + 地址 ====================
-client.on('channelCreate', async channel => {
-    // 匹配你当前的工单命名格式
-    const isTicketChannel = 
-        channel.type === ChannelType.GuildText &&
-        (
-            channel.name.includes('Support / Questions') || 
-            channel.name.includes('Purchase')
-        );
+// ==================== 用户在工单发第一条消息时自动发送产品价格 + 地址 ====================
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
 
-    if (isTicketChannel) {
+    const channelName = message.channel.name;
+
+    // 判断是否是工单频道
+    const isTicketChannel = 
+        channelName.includes('Support / Questions') || 
+        channelName.includes('Purchase');
+
+    // 只在工单频道里，且是用户发的第一条消息时触发
+    if (isTicketChannel && message.channel.messages.cache.size <= 2) {
         try {
-            // 构建产品价格列表
             let productList = '';
             products.forEach(p => {
                 productList += `**${p.name}** — ${p.price}\n${p.desc}\n\n`;
@@ -89,12 +90,12 @@ client.on('channelCreate', async channel => {
                 .setTitle('💰 Payment Addresses')
                 .setDescription(paymentInfo)
                 .setColor('#ef4444')
-                .setFooter({ text: 'After payment, please upload your transaction screenshot. We will process it as soon as possible.' });
+                .setFooter({ text: 'After payment, please upload your transaction screenshot.' });
 
-            await channel.send({ embeds: [priceEmbed, paymentEmbed] });
-            console.log(`Sent product & payment info to new ticket: ${channel.name}`);
+            await message.channel.send({ embeds: [priceEmbed, paymentEmbed] });
+            console.log(`Sent product info in ticket: ${channelName}`);
         } catch (error) {
-            console.error('Failed to send info to ticket channel:', error);
+            console.error('Failed to send product info:', error);
         }
     }
 });
