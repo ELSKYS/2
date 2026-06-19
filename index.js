@@ -2,9 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
 const Database = require('better-sqlite3');
 
-// ==================== 临时写死 Token（仅用于测试） ====================
-const TOKEN = "522c80965a5dae09afdfc1d4c356d1aa3d8adee5b5fb9f1682dc21f066ee947a";
-// ============================================================
+const TOKEN = process.env.TOKEN;
 
 const client = new Client({
     intents: [
