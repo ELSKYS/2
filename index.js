@@ -2,7 +2,10 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
 const Database = require('better-sqlite3');
 
-const TOKEN = process.env.TOKEN;
+// ==================== 临时写死 Token（仅用于测试） ====================
+const TOKEN = "522c80965a5dae09afdfc1d4c356d1aa3d8adee5b5fb9f1682dc21f066ee947a";
+// ============================================================
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -33,7 +36,7 @@ const products = [
     { id: 3, name: "EAC Rank", price: "$369", desc: "支持排位和杯赛" },
 ];
 
-// 全局错误捕获（防止崩溃）
+// 全局错误捕获
 process.on('unhandledRejection', error => {
     console.error('未处理的 Promise 拒绝:', error);
 });
