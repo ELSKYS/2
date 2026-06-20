@@ -23,6 +23,13 @@ const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || null;
+const STATUS_CHANNEL_ID = process.env.STATUS_CHANNEL_ID || null;
+const STATUS_TIMEZONE = process.env.STATUS_TIMEZONE || 'America/New_York';
+const STATUS_POST_TIMES = (process.env.STATUS_POST_TIMES || '09:00,21:00')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+const STATUS_DM_DISCOUNT = process.env.STATUS_DM_DISCOUNT || '10%';
 
 const PRODUCT_IMAGE_PATH = path.join(__dirname, 'images', 'red-dma-brand.jpg');
 const PRODUCT_IMAGE_NAME = 'red-dma-brand.jpg';
@@ -51,7 +58,29 @@ db.exec(`
         status TEXT DEFAULT 'open',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS daily_status_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        post_date TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        posted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
 `);
+
+// Edit this list to reflect real firmware support status
+const firmwareSupportStatus = [
+    { name: 'Universal Firmware', note: 'EAC / VGK / BE' },
+    { name: 'Universal PRO', note: 'All Games' },
+    { name: 'Specific Firmware', note: 'BE / JAVELIN / GC / VAC' },
+    { name: 'EAC Basic', note: 'Rust / Apex / FN' },
+    { name: 'EAC Rank', note: 'FN Ranked & Cup' },
+    { name: 'Faceit', note: 'With & Without Warranty' },
+    { name: 'VGK', note: 'Vanguard' },
+    { name: 'Hidden', note: 'FiveM / Free Fire' },
+    { name: 'RDMA Day / Week / Month Card', note: 'VGK / EAC / BE' },
+];
 
 const products = [
     {
@@ -441,6 +470,154 @@ client.on('messageCreate', async (message) => {
     }
 });
 
+function getUsDateTimeParts(date = new Date()) {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: STATUS_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+    });
+
+    const parts = Object.fromEntries(
+        formatter.formatToParts(date).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
+    );
+
+    const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
+    const hour = parts.hour.padStart(2, '0');
+    const minute = parts.minute.padStart(2, '0');
+    const timeKey = `${hour}:${minute}`;
+    const display = new Intl.DateTimeFormat('en-US', {
+        timeZone: STATUS_TIMEZONE,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+        timeZoneName: 'short',
+    }).format(date);
+
+    return { dateKey, timeKey, display };
+}
+
+function buildFirmwareStatusLines() {
+    return firmwareSupportStatus
+        .map((item) => `√ **${item.name}** — ${item.note}`)
+        .join('\n');
+}
+
+function buildDailyStatusEmbed() {
+    const { display } = getUsDateTimeParts();
+
+    return new EmbedBuilder()
+        .setTitle('📊 Daily Firmware Status Report')
+        .setDescription(
+            '**All firmware systems operational today:**\n\n' +
+                buildFirmwareStatusLines() +
+                '\n\n' +
+                '━━━━━━━━━━━━━━━━━━━━\n' +
+                `💬 **DM us to purchase** — Private message orders get **${STATUS_DM_DISCOUNT}** discount!\n` +
+                'Use `/product` or `/buy` in server, or message us directly for the best price.'
+        )
+        .addFields({
+            name: '🕐 US Time (Live)',
+            value: display,
+            inline: false,
+        })
+        .setColor(0x22c55e)
+        .setFooter({ text: 'RED DMA • Auto-updated twice daily • Previous day posts are removed automatically' })
+        .setTimestamp();
+}
+
+async function deletePreviousDayStatusPosts(channel) {
+    const { dateKey: today } = getUsDateTimeParts();
+    const oldPosts = db
+        .prepare('SELECT message_id FROM daily_status_posts WHERE channel_id = ? AND post_date < ?')
+        .all(channel.id, today);
+
+    for (const row of oldPosts) {
+        try {
+            const msg = await channel.messages.fetch(row.message_id);
+            await msg.delete();
+        } catch {
+            // Message may already be deleted manually
+        }
+    }
+
+    db.prepare('DELETE FROM daily_status_posts WHERE channel_id = ? AND post_date < ?').run(channel.id, today);
+}
+
+async function postDailyStatus(slot, { force = false } = {}) {
+    if (!STATUS_CHANNEL_ID) {
+        console.log('STATUS_CHANNEL_ID not configured, skipping daily status post');
+        return null;
+    }
+
+    const channel = await client.channels.fetch(STATUS_CHANNEL_ID).catch(() => null);
+    if (!channel || channel.type !== ChannelType.GuildText) {
+        console.error('STATUS_CHANNEL_ID is invalid or not a text channel');
+        return null;
+    }
+
+    const { dateKey: today } = getUsDateTimeParts();
+
+    if (!force) {
+        const alreadyPosted = db
+            .prepare('SELECT id FROM daily_status_posts WHERE channel_id = ? AND post_date = ? AND slot = ?')
+            .get(channel.id, today, slot);
+        if (alreadyPosted) return null;
+    }
+
+    await deletePreviousDayStatusPosts(channel);
+
+    const embed = buildDailyStatusEmbed();
+    const message = await channel.send({
+        content: '@everyone **Daily Firmware Status Update**',
+        embeds: [embed],
+        allowedMentions: { parse: ['everyone'] },
+    });
+
+    db.prepare(
+        'INSERT INTO daily_status_posts (channel_id, message_id, post_date, slot) VALUES (?, ?, ?, ?)'
+    ).run(channel.id, message.id, today, slot);
+
+    console.log(`Posted daily status (${slot}) to #${channel.name}`);
+    return message;
+}
+
+let lastSchedulerTick = '';
+
+function startDailyStatusScheduler() {
+    if (!STATUS_CHANNEL_ID) {
+        console.log('Daily status scheduler disabled (set STATUS_CHANNEL_ID in .env)');
+        return;
+    }
+
+    console.log(
+        `Daily status scheduler active — timezone: ${STATUS_TIMEZONE}, times: ${STATUS_POST_TIMES.join(', ')}`
+    );
+
+    const tick = async () => {
+        const { dateKey, timeKey } = getUsDateTimeParts();
+        const tickKey = `${dateKey}|${timeKey}`;
+        if (tickKey === lastSchedulerTick) return;
+        lastSchedulerTick = tickKey;
+
+        if (STATUS_POST_TIMES.includes(timeKey)) {
+            await postDailyStatus(timeKey);
+        }
+    };
+
+    tick();
+    setInterval(tick, 30 * 1000);
+}
+
 client.on('guildMemberAdd', async (member) => {
     try {
         const image = getProductImageAttachment();
@@ -472,6 +649,10 @@ async function registerCommands() {
         {
             name: 'product',
             description: 'View detailed product introduction with images (select and open ticket)',
+        },
+        {
+            name: 'status-now',
+            description: 'Manually post daily firmware status now (Admin only)',
         },
         {
             name: 'announce',
@@ -507,6 +688,7 @@ async function registerCommands() {
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
     await registerCommands();
+    startDailyStatusScheduler();
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -664,6 +846,28 @@ client.on('interactionCreate', async (interaction) => {
                     console.error('Failed to delete ticket channel:', error);
                 }
             }, 5000);
+            return;
+        }
+
+        if (interaction.isChatInputCommand() && interaction.commandName === 'status-now') {
+            if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+                await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+                return;
+            }
+
+            await interaction.deferReply({ ephemeral: true });
+
+            const { timeKey } = getUsDateTimeParts();
+            const message = await postDailyStatus(`manual-${timeKey}`, { force: true });
+
+            if (!message) {
+                await interaction.editReply({
+                    content: '❌ Failed to post. Check STATUS_CHANNEL_ID in .env and bot permissions.',
+                });
+                return;
+            }
+
+            await interaction.editReply({ content: `✅ Status posted in ${message.channel}` });
             return;
         }
 
