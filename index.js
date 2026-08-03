@@ -24,8 +24,8 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || null;
 const STATUS_CHANNEL_ID = process.env.STATUS_CHANNEL_ID || null;
-const STATUS_TIMEZONE = process.env.STATUS_TIMEZONE || 'America/New_York';
-const STATUS_POST_TIMES = (process.env.STATUS_POST_TIMES || '09:00,21:00')
+const STATUS_TIMEZONE = process.env.STATUS_TIMEZONE || 'UTC';
+const STATUS_POST_TIMES = (process.env.STATUS_POST_TIMES || '12:00')
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
@@ -531,7 +531,9 @@ function buildDailyStatusEmbed() {
             inline: false,
         })
         .setColor(0x22c55e)
-        .setFooter({ text: 'RED DMA • Auto-updated twice daily • Previous day posts are removed automatically' })
+        .setFooter({
+            text: `RED DMA • Auto-updated ${STATUS_POST_TIMES.length}x daily (${STATUS_POST_TIMES.join(', ')} ${STATUS_TIMEZONE}) • Previous day posts are removed automatically`,
+        })
         .setTimestamp();
 }
 

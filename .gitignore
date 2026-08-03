@@ -1,0 +1,4 @@
+node_modules/
+sales.db
+.env
+*.log
