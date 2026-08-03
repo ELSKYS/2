@@ -30,6 +30,12 @@ const STATUS_POST_TIMES = (process.env.STATUS_POST_TIMES || '12:00')
     .map((t) => t.trim())
     .filter(Boolean);
 const STATUS_DM_DISCOUNT = process.env.STATUS_DM_DISCOUNT || '10%';
+// Auto-delete @everyone status shout after N minutes (0 = never auto-delete by TTL)
+const STATUS_MESSAGE_TTL_MINUTES = Math.max(
+    0,
+    parseInt(process.env.STATUS_MESSAGE_TTL_MINUTES || '10', 10) || 0
+);
+const STATUS_MESSAGE_TTL_MS = STATUS_MESSAGE_TTL_MINUTES * 60 * 1000;
 
 const PRODUCT_IMAGE_PATH = path.join(__dirname, 'images', 'red-dma-brand.jpg');
 const PRODUCT_IMAGE_NAME = 'red-dma-brand.jpg';
@@ -65,9 +71,17 @@ db.exec(`
         message_id TEXT NOT NULL,
         post_date TEXT NOT NULL,
         slot TEXT NOT NULL,
-        posted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        posted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        delete_at INTEGER
     );
 `);
+
+// Older DBs created before delete_at existed
+try {
+    db.exec('ALTER TABLE daily_status_posts ADD COLUMN delete_at INTEGER');
+} catch {
+    // column already present
+}
 
 // Edit this list to reflect real firmware support status
 const firmwareSupportStatus = [
@@ -532,9 +546,63 @@ function buildDailyStatusEmbed() {
         })
         .setColor(0x22c55e)
         .setFooter({
-            text: `RED DMA • Auto-updated ${STATUS_POST_TIMES.length}x daily (${STATUS_POST_TIMES.join(', ')} ${STATUS_TIMEZONE}) • Previous day posts are removed automatically`,
+            text:
+                `RED DMA • Auto ${STATUS_POST_TIMES.length}x daily (${STATUS_POST_TIMES.join(', ')} ${STATUS_TIMEZONE})` +
+                (STATUS_MESSAGE_TTL_MINUTES > 0
+                    ? ` • @everyone removed after ${STATUS_MESSAGE_TTL_MINUTES}m`
+                    : ' • Previous day posts cleaned automatically'),
         })
         .setTimestamp();
+}
+
+async function deleteStatusMessageByIds(channelId, messageId) {
+    try {
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel || channel.type !== ChannelType.GuildText) {
+            db.prepare('DELETE FROM daily_status_posts WHERE message_id = ?').run(messageId);
+            return false;
+        }
+        try {
+            const msg = await channel.messages.fetch(messageId);
+            await msg.delete();
+            console.log(`Deleted status shout message ${messageId} in #${channel.name}`);
+        } catch {
+            // already deleted manually or missing permissions
+        }
+        db.prepare('DELETE FROM daily_status_posts WHERE message_id = ?').run(messageId);
+        return true;
+    } catch (error) {
+        console.error('Failed to delete status message:', error);
+        return false;
+    }
+}
+
+function scheduleStatusMessageDeletion(channelId, messageId, deleteAtMs) {
+    if (!deleteAtMs) return;
+
+    const delay = Math.max(0, deleteAtMs - Date.now());
+    setTimeout(() => {
+        deleteStatusMessageByIds(channelId, messageId).catch((err) =>
+            console.error('Scheduled status delete failed:', err)
+        );
+    }, delay);
+
+    console.log(
+        `Status message ${messageId} scheduled for delete in ${Math.round(delay / 1000)}s`
+    );
+}
+
+async function processExpiredStatusPosts() {
+    const now = Date.now();
+    const due = db
+        .prepare(
+            'SELECT channel_id, message_id, delete_at FROM daily_status_posts WHERE delete_at IS NOT NULL AND delete_at <= ?'
+        )
+        .all(now);
+
+    for (const row of due) {
+        await deleteStatusMessageByIds(row.channel_id, row.message_id);
+    }
 }
 
 async function deletePreviousDayStatusPosts(channel) {
@@ -585,11 +653,21 @@ async function postDailyStatus(slot, { force = false } = {}) {
         allowedMentions: { parse: ['everyone'] },
     });
 
-    db.prepare(
-        'INSERT INTO daily_status_posts (channel_id, message_id, post_date, slot) VALUES (?, ?, ?, ?)'
-    ).run(channel.id, message.id, today, slot);
+    const deleteAt =
+        STATUS_MESSAGE_TTL_MS > 0 ? Date.now() + STATUS_MESSAGE_TTL_MS : null;
 
-    console.log(`Posted daily status (${slot}) to #${channel.name}`);
+    db.prepare(
+        'INSERT INTO daily_status_posts (channel_id, message_id, post_date, slot, delete_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(channel.id, message.id, today, slot, deleteAt);
+
+    if (deleteAt) {
+        scheduleStatusMessageDeletion(channel.id, message.id, deleteAt);
+    }
+
+    console.log(
+        `Posted daily status (${slot}) to #${channel.name}` +
+            (deleteAt ? ` (auto-delete in ${STATUS_MESSAGE_TTL_MINUTES}m)` : '')
+    );
     return message;
 }
 
@@ -602,10 +680,31 @@ function startDailyStatusScheduler() {
     }
 
     console.log(
-        `Daily status scheduler active — timezone: ${STATUS_TIMEZONE}, times: ${STATUS_POST_TIMES.join(', ')}`
+        `Daily status scheduler active — timezone: ${STATUS_TIMEZONE}, times: ${STATUS_POST_TIMES.join(', ')}` +
+            (STATUS_MESSAGE_TTL_MINUTES > 0
+                ? `, auto-delete after ${STATUS_MESSAGE_TTL_MINUTES}m`
+                : ', auto-delete disabled')
     );
 
+    // Catch up deletes after restart / missed timers
+    processExpiredStatusPosts().catch((err) => console.error(err));
+    // Re-arm timers for posts that are not yet due
+    const pending = db
+        .prepare(
+            'SELECT channel_id, message_id, delete_at FROM daily_status_posts WHERE delete_at IS NOT NULL AND delete_at > ?'
+        )
+        .all(Date.now());
+    for (const row of pending) {
+        scheduleStatusMessageDeletion(row.channel_id, row.message_id, row.delete_at);
+    }
+
     const tick = async () => {
+        try {
+            await processExpiredStatusPosts();
+        } catch (err) {
+            console.error('Expired status cleanup failed:', err);
+        }
+
         const { dateKey, timeKey } = getUsDateTimeParts();
         const tickKey = `${dateKey}|${timeKey}`;
         if (tickKey === lastSchedulerTick) return;
