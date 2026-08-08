@@ -1,0 +1,169 @@
+[
+  {
+    "id": 0,
+    "name": "Universal",
+    "price": "$600",
+    "desc": "Supports EAC / VGK / BE etc. Lifetime + 1 Month Warranty",
+    "features": [
+      "Universal support for major anti-cheats (EAC, VGK, BE, etc.)",
+      "All Motherboards: AMD & Intel",
+      "Duration: Lifetime",
+      "1 Month Warranty included",
+      "High stability, survived multiple ban waves"
+    ]
+  },
+  {
+    "id": 1,
+    "name": "Universal PRO",
+    "price": "$800",
+    "desc": "All games supported. Lifetime + 1 Month Warranty",
+    "features": [
+      "Full anti-cheat coverage for all games",
+      "All Motherboards: AMD & Intel",
+      "Duration: Lifetime",
+      "Maximum stability and compatibility",
+      "1 Month Warranty included"
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Specific Firmware (BE, JAVELIN, GC, VAC etc.)",
+    "price": "$150 (6 Months)",
+    "desc": "Supports BE, Javelin, GC, VAC etc.",
+    "features": [
+      "All Motherboards AMD & Intel",
+      "Duration: Lifetime / Duração: Vitalícia",
+      "Warranty plans / Planos de Garantia available",
+      "6 Months & 1 Year options",
+      "Development within 1-5 Business Days"
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Specific Firmware (1 Year)",
+    "price": "$250 (1 Year)",
+    "desc": "Supports BE, Javelin, GC, VAC etc.",
+    "features": [
+      "All Motherboards AMD & Intel",
+      "Duration: Lifetime",
+      "Extended 1 Year plan",
+      "Warranty plans available",
+      "Fast development and updates"
+    ]
+  },
+  {
+    "id": 4,
+    "name": "EAC Basic",
+    "price": "$169",
+    "desc": "Rust / Apex / FN (No Rank/Cup). Lifetime + 1 Month Warranty",
+    "features": [
+      "Reliable EAC bypass",
+      "Supported: Rust, Apex Legends, Fortnite (No Rank/Cup)",
+      "Lifetime access",
+      "1 Month Warranty"
+    ]
+  },
+  {
+    "id": 5,
+    "name": "EAC Rank",
+    "price": "$369",
+    "desc": "FN Ranked & Cup support. Lifetime + 1 Month Warranty",
+    "features": [
+      "Full ranked and tournament support for Fortnite",
+      "EAC bypass with high stability",
+      "Lifetime + 1 Month Warranty",
+      "Optimized for competitive play"
+    ]
+  },
+  {
+    "id": 6,
+    "name": "Faceit (No Warranty)",
+    "price": "$200",
+    "desc": "Faceit without warranty",
+    "features": [
+      "Faceit anti-cheat support",
+      "No warranty option (lower price)",
+      "Fast setup"
+    ]
+  },
+  {
+    "id": 7,
+    "name": "Faceit (1 Month Warranty)",
+    "price": "$500",
+    "desc": "Faceit with 1 month warranty",
+    "features": [
+      "Premium Faceit solution",
+      "1 Month Warranty",
+      "High performance and stability",
+      "Recommended for serious users"
+    ]
+  },
+  {
+    "id": 8,
+    "name": "VGK",
+    "price": "$300",
+    "desc": "VGK. Lifetime + 1 Month Warranty",
+    "features": [
+      "Vanguard bypass",
+      "Lifetime access",
+      "1 Month Warranty",
+      "Stable across updates"
+    ]
+  },
+  {
+    "id": 9,
+    "name": "Hidden (6 Months)",
+    "price": "$150",
+    "desc": "FiveM & Free Fire hidden version",
+    "features": [
+      "Hidden version for FiveM and Free Fire",
+      "6 Months access",
+      "Low detection risk"
+    ]
+  },
+  {
+    "id": 10,
+    "name": "Hidden (12 Months)",
+    "price": "$250",
+    "desc": "FiveM & Free Fire hidden version",
+    "features": [
+      "Hidden version for FiveM and Free Fire",
+      "12 Months access",
+      "Best value for long term users"
+    ]
+  },
+  {
+    "id": 11,
+    "name": "RDMA Day Card",
+    "price": "$10",
+    "desc": "RDMA Day Card (Supports VGK/EAC/BE etc.)",
+    "features": [
+      "Flexible RDMA access",
+      "1 Day card",
+      "Supports major anti-cheats",
+      "Great for testing"
+    ]
+  },
+  {
+    "id": 12,
+    "name": "RDMA Week Card",
+    "price": "$60",
+    "desc": "RDMA Week Card (Supports VGK/EAC/BE etc.)",
+    "features": [
+      "1 Week RDMA access",
+      "Full support for VGK/EAC/BE",
+      "Invite friends for free days"
+    ]
+  },
+  {
+    "id": 13,
+    "name": "RDMA Month Card",
+    "price": "$200",
+    "desc": "RDMA Month Card (Supports VGK/EAC/BE etc.)",
+    "features": [
+      "1 Month full RDMA access",
+      "Best for regular users",
+      "New user rewards available"
+    ]
+  }
+]

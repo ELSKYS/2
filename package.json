@@ -1,7 +1,7 @@
 {
   "name": "reddma-discord-bot",
   "version": "1.0.0",
-  "description": "RED DMA Sales Bot with Ticket System",
+  "description": "RED DMA Sales Bot with Ticket System (no crypto payment auto-send)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

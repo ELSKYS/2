@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fs = require('fs');
 const path = require('path');
 const {
     Client,
@@ -24,18 +25,65 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || null;
 const STATUS_CHANNEL_ID = process.env.STATUS_CHANNEL_ID || null;
-const STATUS_TIMEZONE = process.env.STATUS_TIMEZONE || 'UTC';
-const STATUS_POST_TIMES = (process.env.STATUS_POST_TIMES || '12:00')
+
+const DATA_DIR = path.join(__dirname, 'data');
+
+function loadJson(fileName, fallback) {
+    const full = path.join(DATA_DIR, fileName);
+    try {
+        return JSON.parse(fs.readFileSync(full, 'utf8'));
+    } catch (err) {
+        console.error(`Failed to load ${fileName}:`, err.message);
+        return fallback;
+    }
+}
+
+function loadRuntimeData() {
+    const products = loadJson('products.json', []);
+    const firmwareSupportStatus = loadJson('firmware_status.json', []);
+    const settings = loadJson('settings.json', {});
+    return { products, firmwareSupportStatus, settings };
+}
+
+let { products, firmwareSupportStatus, settings } = loadRuntimeData();
+
+function refreshDataFromDisk() {
+    ({ products, firmwareSupportStatus, settings } = loadRuntimeData());
+    return { products, firmwareSupportStatus, settings };
+}
+
+const STATUS_TIMEZONE =
+    process.env.STATUS_TIMEZONE || settings.status_timezone || 'UTC';
+const STATUS_POST_TIMES = (
+    process.env.STATUS_POST_TIMES ||
+    (Array.isArray(settings.status_post_times)
+        ? settings.status_post_times.join(',')
+        : '12:00')
+)
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
-const STATUS_DM_DISCOUNT = process.env.STATUS_DM_DISCOUNT || '10%';
-// Auto-delete @everyone status shout after N minutes (0 = never auto-delete by TTL)
+const STATUS_DM_DISCOUNT =
+    process.env.STATUS_DM_DISCOUNT || settings.status_dm_discount || '10%';
 const STATUS_MESSAGE_TTL_MINUTES = Math.max(
     0,
-    parseInt(process.env.STATUS_MESSAGE_TTL_MINUTES || '10', 10) || 0
+    parseInt(
+        process.env.STATUS_MESSAGE_TTL_MINUTES ||
+            String(settings.status_message_ttl_minutes ?? 10),
+        10
+    ) || 0
 );
 const STATUS_MESSAGE_TTL_MS = STATUS_MESSAGE_TTL_MINUTES * 60 * 1000;
+
+const BRAND_NAME = settings.brand_name || 'RED DMA';
+const BRAND_TAGLINE = settings.brand_tagline || 'Premium DMA Firmware';
+const WEBSITE = settings.website || 'https://reddma.xyz';
+const TICKET_WELCOME_TEXT =
+    settings.ticket_welcome_text ||
+    'Welcome! Your order has been created. A staff member will assist you shortly.';
+const ORDER_INSTRUCTIONS =
+    settings.order_instructions ||
+    'A staff member will contact you with the next steps for this order.';
 
 const PRODUCT_IMAGE_PATH = path.join(__dirname, 'images', 'red-dma-brand.jpg');
 const PRODUCT_IMAGE_NAME = 'red-dma-brand.jpg';
@@ -76,224 +124,25 @@ db.exec(`
     );
 `);
 
-// Older DBs created before delete_at existed
 try {
     db.exec('ALTER TABLE daily_status_posts ADD COLUMN delete_at INTEGER');
 } catch {
     // column already present
 }
 
-// Edit this list to reflect real firmware support status
-const firmwareSupportStatus = [
-    { name: 'Universal Firmware', note: 'EAC / VGK / BE' },
-    { name: 'Universal PRO', note: 'All Games' },
-    { name: 'Specific Firmware', note: 'BE / JAVELIN / GC / VAC' },
-    { name: 'EAC Basic', note: 'Rust / Apex / FN' },
-    { name: 'EAC Rank', note: 'FN Ranked & Cup' },
-    { name: 'Faceit', note: 'With & Without Warranty' },
-    { name: 'VGK', note: 'Vanguard' },
-    { name: 'Hidden', note: 'FiveM / Free Fire' },
-    { name: 'RDMA Day / Week / Month Card', note: 'VGK / EAC / BE' },
-];
-
-const products = [
-    {
-        id: 0,
-        name: 'Universal',
-        price: '$600',
-        desc: 'Supports EAC / VGK / BE etc. Lifetime + 1 Month Warranty',
-        features: [
-            'Universal support for major anti-cheats (EAC, VGK, BE, etc.)',
-            'All Motherboards: AMD & Intel',
-            'Duration: Lifetime',
-            '1 Month Warranty included',
-            'High stability, survived multiple ban waves',
-        ],
-    },
-    {
-        id: 1,
-        name: 'Universal PRO',
-        price: '$800',
-        desc: 'All games supported. Lifetime + 1 Month Warranty',
-        features: [
-            'Full anti-cheat coverage for all games',
-            'All Motherboards: AMD & Intel',
-            'Duration: Lifetime',
-            'Maximum stability and compatibility',
-            '1 Month Warranty included',
-        ],
-    },
-    {
-        id: 2,
-        name: 'Specific Firmware (BE, JAVELIN, GC, VAC etc.)',
-        price: '$150 (6 Months)',
-        desc: 'Supports BE, Javelin, GC, VAC etc.',
-        features: [
-            'All Motherboards AMD & Intel',
-            'Duration: Lifetime / Duração: Vitalícia',
-            'Warranty plans / Planos de Garantia available',
-            '6 Months & 1 Year options',
-            'Development within 1-5 Business Days',
-        ],
-    },
-    {
-        id: 3,
-        name: 'Specific Firmware (1 Year)',
-        price: '$250 (1 Year)',
-        desc: 'Supports BE, Javelin, GC, VAC etc.',
-        features: [
-            'All Motherboards AMD & Intel',
-            'Duration: Lifetime',
-            'Extended 1 Year plan',
-            'Warranty plans available',
-            'Fast development and updates',
-        ],
-    },
-    {
-        id: 4,
-        name: 'EAC Basic',
-        price: '$169',
-        desc: 'Rust / Apex / FN (No Rank/Cup). Lifetime + 1 Month Warranty',
-        features: [
-            'Reliable EAC bypass',
-            'Supported: Rust, Apex Legends, Fortnite (No Rank/Cup)',
-            'Lifetime access',
-            '1 Month Warranty',
-        ],
-    },
-    {
-        id: 5,
-        name: 'EAC Rank',
-        price: '$369',
-        desc: 'FN Ranked & Cup support. Lifetime + 1 Month Warranty',
-        features: [
-            'Full ranked and tournament support for Fortnite',
-            'EAC bypass with high stability',
-            'Lifetime + 1 Month Warranty',
-            'Optimized for competitive play',
-        ],
-    },
-    {
-        id: 6,
-        name: 'Faceit (No Warranty)',
-        price: '$200',
-        desc: 'Faceit without warranty',
-        features: [
-            'Faceit anti-cheat support',
-            'No warranty option (lower price)',
-            'Fast setup',
-        ],
-    },
-    {
-        id: 7,
-        name: 'Faceit (1 Month Warranty)',
-        price: '$500',
-        desc: 'Faceit with 1 month warranty',
-        features: [
-            'Premium Faceit solution',
-            '1 Month Warranty',
-            'High performance and stability',
-            'Recommended for serious users',
-        ],
-    },
-    {
-        id: 8,
-        name: 'VGK',
-        price: '$300',
-        desc: 'VGK. Lifetime + 1 Month Warranty',
-        features: [
-            'Vanguard bypass',
-            'Lifetime access',
-            '1 Month Warranty',
-            'Stable across updates',
-        ],
-    },
-    {
-        id: 9,
-        name: 'Hidden (6 Months)',
-        price: '$150',
-        desc: 'FiveM & Free Fire hidden version',
-        features: [
-            'Hidden version for FiveM and Free Fire',
-            '6 Months access',
-            'Low detection risk',
-        ],
-    },
-    {
-        id: 10,
-        name: 'Hidden (12 Months)',
-        price: '$250',
-        desc: 'FiveM & Free Fire hidden version',
-        features: [
-            'Hidden version for FiveM and Free Fire',
-            '12 Months access',
-            'Best value for long term users',
-        ],
-    },
-    {
-        id: 11,
-        name: 'RDMA Day Card',
-        price: '$10',
-        desc: 'RDMA Day Card (Supports VGK/EAC/BE etc.)',
-        features: [
-            'Flexible RDMA access',
-            '1 Day card',
-            'Supports major anti-cheats',
-            'Great for testing',
-        ],
-    },
-    {
-        id: 12,
-        name: 'RDMA Week Card',
-        price: '$60',
-        desc: 'RDMA Week Card (Supports VGK/EAC/BE etc.)',
-        features: [
-            '1 Week RDMA access',
-            'Full support for VGK/EAC/BE',
-            'Invite friends for free days',
-        ],
-    },
-    {
-        id: 13,
-        name: 'RDMA Month Card',
-        price: '$200',
-        desc: 'RDMA Month Card (Supports VGK/EAC/BE etc.)',
-        features: [
-            '1 Month full RDMA access',
-            'Best for regular users',
-            'New user rewards available',
-        ],
-    },
-];
-
-const paymentInfo = `
-**LTC (Litecoin)**
-\`\`\`
-ltc1q7u7zsh0qgzl28nwknwg3hs84fz9mrmee7puk076n0alnuxr4qe2smlddnd
-\`\`\`
-
-**BTC (Bitcoin)**
-\`\`\`
-3LHYderrTnSYK34ME6cHneR6cBQUU7PEYE
-\`\`\`
-
-**SOL (Solana)**
-\`\`\`
-7a4Xt6piGZqyeQFPdTo7JgxFyRp98aajwEcLgcjTkAB4
-\`\`\`
-`;
-
 function getProductImageAttachment() {
     return new AttachmentBuilder(PRODUCT_IMAGE_PATH, { name: PRODUCT_IMAGE_NAME });
 }
 
 function sanitizeChannelName(value) {
-    return value
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 80) || 'product';
+    return (
+        value
+            .toLowerCase()
+            .replace(/[^a-z0-9-]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '')
+            .slice(0, 80) || 'product'
+    );
 }
 
 function buildProductEmbed(product) {
@@ -306,28 +155,26 @@ function buildProductEmbed(product) {
         .setDescription(`${featureList}\n\n**Price:** ${product.price}`)
         .setImage(PRODUCT_IMAGE_URL)
         .setColor(0xef4444)
-        .setFooter({ text: 'RED DMA • Premium DMA Firmware • Click below to open a purchase ticket' });
-}
-
-function buildPaymentEmbed() {
-    return new EmbedBuilder()
-        .setTitle('💰 Payment Addresses')
-        .setDescription(paymentInfo)
-        .setColor('#ef4444')
-        .setFooter({ text: 'After payment, please upload your transaction screenshot.' });
+        .setFooter({
+            text: `${BRAND_NAME} • ${BRAND_TAGLINE} • Click below to open a purchase ticket`,
+        });
 }
 
 function buildOrderEmbed(product) {
     return new EmbedBuilder()
         .setTitle(`Order: ${product.name} (${product.price})`)
-        .setDescription(`${product.desc}\n\nPlease pay using the addresses below and upload your payment screenshot.`)
+        .setDescription(
+            `${product.desc}\n\n${ORDER_INSTRUCTIONS}`
+        )
         .setImage(PRODUCT_IMAGE_URL)
         .setColor('#ef4444');
 }
 
 function getOpenTicketForUser(userId) {
     return db
-        .prepare("SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1")
+        .prepare(
+            "SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1"
+        )
         .get(userId);
 }
 
@@ -387,7 +234,6 @@ async function resolveTicketCategory(guild) {
 async function sendTicketWelcome(ticketChannel, user, product) {
     const image = getProductImageAttachment();
     const orderEmbed = buildOrderEmbed(product);
-    const paymentEmbed = buildPaymentEmbed();
 
     const closeBtn = new ButtonBuilder()
         .setCustomId('close_ticket')
@@ -397,8 +243,8 @@ async function sendTicketWelcome(ticketChannel, user, product) {
     const row = new ActionRowBuilder().addComponents(closeBtn);
 
     await ticketChannel.send({
-        content: `<@${user.id}> Welcome! Your order has been created.`,
-        embeds: [orderEmbed, paymentEmbed],
+        content: `<@${user.id}> ${TICKET_WELCOME_TEXT}`,
+        embeds: [orderEmbed],
         files: [image],
         components: [row],
     });
@@ -422,7 +268,7 @@ async function createTicketChannel(guild, user, product, sourceChannelId = null)
         name: channelName,
         type: ChannelType.GuildText,
         parent: categoryId ?? undefined,
-        topic: `RED DMA purchase ticket for ${user.tag} • ${product.name}`,
+        topic: `${BRAND_NAME} purchase ticket for ${user.tag} • ${product.name}`,
         permissionOverwrites: buildTicketPermissions(guild, user.id),
     });
 
@@ -444,7 +290,7 @@ function buildProductCardRow(product) {
     return new ActionRowBuilder().addComponents(ticketBtn);
 }
 
-// Legacy ticket channels still supported
+// Legacy ticket channels: first user message gets product list (no payment info)
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
@@ -458,6 +304,7 @@ client.on('messageCreate', async (message) => {
     if (!isTicketChannel) return;
 
     try {
+        refreshDataFromDisk();
         const fetchedMessages = await message.channel.messages.fetch({ limit: 10 });
         const userMessages = fetchedMessages.filter((m) => !m.author.bot);
 
@@ -469,22 +316,22 @@ client.on('messageCreate', async (message) => {
         });
 
         const priceEmbed = new EmbedBuilder()
-            .setTitle('RED DMA Product Price List')
-            .setDescription(productList)
+            .setTitle(`${BRAND_NAME} Product Price List`)
+            .setDescription(productList || 'No products configured.')
             .setImage(PRODUCT_IMAGE_URL)
-            .setColor('#ef4444');
+            .setColor('#ef4444')
+            .setFooter({ text: 'Staff will assist you with the next steps.' });
 
-        const paymentEmbed = buildPaymentEmbed();
         const image = getProductImageAttachment();
 
-        await message.channel.send({ embeds: [priceEmbed, paymentEmbed], files: [image] });
+        await message.channel.send({ embeds: [priceEmbed], files: [image] });
         console.log(`Sent product info in ticket: ${channelName}`);
     } catch (error) {
         console.error('Failed to send product info:', error);
     }
 });
 
-function getUsDateTimeParts(date = new Date()) {
+function getZonedDateTimeParts(date = new Date()) {
     const formatter = new Intl.DateTimeFormat('en-US', {
         timeZone: STATUS_TIMEZONE,
         year: 'numeric',
@@ -497,7 +344,10 @@ function getUsDateTimeParts(date = new Date()) {
     });
 
     const parts = Object.fromEntries(
-        formatter.formatToParts(date).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
+        formatter
+            .formatToParts(date)
+            .filter((p) => p.type !== 'literal')
+            .map((p) => [p.type, p.value])
     );
 
     const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
@@ -527,7 +377,7 @@ function buildFirmwareStatusLines() {
 }
 
 function buildDailyStatusEmbed() {
-    const { display } = getUsDateTimeParts();
+    const { display } = getZonedDateTimeParts();
 
     return new EmbedBuilder()
         .setTitle('📊 Daily Firmware Status Report')
@@ -540,14 +390,14 @@ function buildDailyStatusEmbed() {
                 'Use `/product` or `/buy` in server, or message us directly for the best price.'
         )
         .addFields({
-            name: '🕐 US Time (Live)',
+            name: '🕐 Live Time',
             value: display,
             inline: false,
         })
         .setColor(0x22c55e)
         .setFooter({
             text:
-                `RED DMA • Auto ${STATUS_POST_TIMES.length}x daily (${STATUS_POST_TIMES.join(', ')} ${STATUS_TIMEZONE})` +
+                `${BRAND_NAME} • Auto ${STATUS_POST_TIMES.length}x daily (${STATUS_POST_TIMES.join(', ')} ${STATUS_TIMEZONE})` +
                 (STATUS_MESSAGE_TTL_MINUTES > 0
                     ? ` • @everyone removed after ${STATUS_MESSAGE_TTL_MINUTES}m`
                     : ' • Previous day posts cleaned automatically'),
@@ -567,7 +417,7 @@ async function deleteStatusMessageByIds(channelId, messageId) {
             await msg.delete();
             console.log(`Deleted status shout message ${messageId} in #${channel.name}`);
         } catch {
-            // already deleted manually or missing permissions
+            // already deleted
         }
         db.prepare('DELETE FROM daily_status_posts WHERE message_id = ?').run(messageId);
         return true;
@@ -606,9 +456,11 @@ async function processExpiredStatusPosts() {
 }
 
 async function deletePreviousDayStatusPosts(channel) {
-    const { dateKey: today } = getUsDateTimeParts();
+    const { dateKey: today } = getZonedDateTimeParts();
     const oldPosts = db
-        .prepare('SELECT message_id FROM daily_status_posts WHERE channel_id = ? AND post_date < ?')
+        .prepare(
+            'SELECT message_id FROM daily_status_posts WHERE channel_id = ? AND post_date < ?'
+        )
         .all(channel.id, today);
 
     for (const row of oldPosts) {
@@ -616,11 +468,13 @@ async function deletePreviousDayStatusPosts(channel) {
             const msg = await channel.messages.fetch(row.message_id);
             await msg.delete();
         } catch {
-            // Message may already be deleted manually
+            // already gone
         }
     }
 
-    db.prepare('DELETE FROM daily_status_posts WHERE channel_id = ? AND post_date < ?').run(channel.id, today);
+    db.prepare(
+        'DELETE FROM daily_status_posts WHERE channel_id = ? AND post_date < ?'
+    ).run(channel.id, today);
 }
 
 async function postDailyStatus(slot, { force = false } = {}) {
@@ -629,17 +483,21 @@ async function postDailyStatus(slot, { force = false } = {}) {
         return null;
     }
 
+    refreshDataFromDisk();
+
     const channel = await client.channels.fetch(STATUS_CHANNEL_ID).catch(() => null);
     if (!channel || channel.type !== ChannelType.GuildText) {
         console.error('STATUS_CHANNEL_ID is invalid or not a text channel');
         return null;
     }
 
-    const { dateKey: today } = getUsDateTimeParts();
+    const { dateKey: today } = getZonedDateTimeParts();
 
     if (!force) {
         const alreadyPosted = db
-            .prepare('SELECT id FROM daily_status_posts WHERE channel_id = ? AND post_date = ? AND slot = ?')
+            .prepare(
+                'SELECT id FROM daily_status_posts WHERE channel_id = ? AND post_date = ? AND slot = ?'
+            )
             .get(channel.id, today, slot);
         if (alreadyPosted) return null;
     }
@@ -686,9 +544,7 @@ function startDailyStatusScheduler() {
                 : ', auto-delete disabled')
     );
 
-    // Catch up deletes after restart / missed timers
     processExpiredStatusPosts().catch((err) => console.error(err));
-    // Re-arm timers for posts that are not yet due
     const pending = db
         .prepare(
             'SELECT channel_id, message_id, delete_at FROM daily_status_posts WHERE delete_at IS NOT NULL AND delete_at > ?'
@@ -705,7 +561,7 @@ function startDailyStatusScheduler() {
             console.error('Expired status cleanup failed:', err);
         }
 
-        const { dateKey, timeKey } = getUsDateTimeParts();
+        const { dateKey, timeKey } = getZonedDateTimeParts();
         const tickKey = `${dateKey}|${timeKey}`;
         if (tickKey === lastSchedulerTick) return;
         lastSchedulerTick = tickKey;
@@ -723,12 +579,11 @@ client.on('guildMemberAdd', async (member) => {
     try {
         const image = getProductImageAttachment();
         const welcomeEmbed = new EmbedBuilder()
-            .setTitle('Welcome to RED DMA!')
+            .setTitle(`Welcome to ${BRAND_NAME}!`)
             .setDescription(
-                'Thank you for joining **RED DMA • Premium DMA Firmware**.\n\n' +
+                `Thank you for joining **${BRAND_NAME} • ${BRAND_TAGLINE}**.\n\n` +
                     'Please take a moment to read and follow the **server rules**.\n\n' +
-                    'You can also visit our website:\n' +
-                    '**https://reddma.xyz**\n\n' +
+                    (WEBSITE ? `You can also visit our website:\n**${WEBSITE}**\n\n` : '') +
                     'Use `/product` to browse products, or `/buy` to create a purchase ticket.'
             )
             .setImage(PRODUCT_IMAGE_URL)
@@ -745,7 +600,7 @@ async function registerCommands() {
     const commands = [
         {
             name: 'buy',
-            description: 'View RED DMA products and create a purchase ticket',
+            description: `View ${BRAND_NAME} products and create a purchase ticket`,
         },
         {
             name: 'product',
@@ -773,6 +628,10 @@ async function registerCommands() {
                 },
             ],
         },
+        {
+            name: 'reload-data',
+            description: 'Reload products/settings from disk (Admin only)',
+        },
     ];
 
     const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -788,6 +647,7 @@ async function registerCommands() {
 
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
+    console.log(`Loaded ${products.length} products from data/products.json`);
     await registerCommands();
     startDailyStatusScheduler();
 });
@@ -795,8 +655,9 @@ client.once(Events.ClientReady, async () => {
 client.on('interactionCreate', async (interaction) => {
     try {
         if (interaction.isChatInputCommand() && interaction.commandName === 'buy') {
+            refreshDataFromDisk();
             const embed = new EmbedBuilder()
-                .setTitle('RED DMA Product List')
+                .setTitle(`${BRAND_NAME} Product List`)
                 .setDescription('Click the buttons below to create a purchase ticket.')
                 .setImage(PRODUCT_IMAGE_URL)
                 .setColor('#ef4444');
@@ -817,11 +678,25 @@ client.on('interactionCreate', async (interaction) => {
             }
 
             const image = getProductImageAttachment();
-            await interaction.reply({ embeds: [embed], components: rows, files: [image], ephemeral: true });
+            await interaction.reply({
+                embeds: [embed],
+                components: rows,
+                files: [image],
+                ephemeral: true,
+            });
             return;
         }
 
         if (interaction.isChatInputCommand() && interaction.commandName === 'product') {
+            refreshDataFromDisk();
+            if (!products.length) {
+                await interaction.reply({
+                    content: 'No products configured. Use the desktop manager to add products.',
+                    ephemeral: true,
+                });
+                return;
+            }
+
             const select = new StringSelectMenuBuilder()
                 .setCustomId('select_product_intro')
                 .setPlaceholder('Select a product to view detailed introduction')
@@ -830,7 +705,9 @@ client.on('interactionCreate', async (interaction) => {
                         new StringSelectMenuOptionBuilder()
                             .setLabel(`${p.name} — ${p.price}`.slice(0, 100))
                             .setValue(p.id.toString())
-                            .setDescription(p.desc.length > 90 ? `${p.desc.substring(0, 87)}...` : p.desc)
+                            .setDescription(
+                                p.desc.length > 90 ? `${p.desc.substring(0, 87)}...` : p.desc
+                            )
                     )
                 );
 
@@ -845,6 +722,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (interaction.isStringSelectMenu() && interaction.customId === 'select_product_intro') {
+            refreshDataFromDisk();
             const productId = parseInt(interaction.values[0], 10);
             const product = products.find((p) => p.id === productId);
             if (!product) {
@@ -856,8 +734,6 @@ client.on('interactionCreate', async (interaction) => {
             const row = buildProductCardRow(product);
             const image = getProductImageAttachment();
 
-            // Update the ephemeral selector, then post the card as a follow-up
-            // so it stays directly under the /product command instead of drifting in chat.
             await interaction.update({
                 content: `✅ Selected **${product.name}**. Product card posted below this command.`,
                 components: [],
@@ -873,6 +749,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
+            refreshDataFromDisk();
             const productId = parseInt(interaction.customId.split('_')[1], 10);
             const product = products.find((p) => p.id === productId);
             if (!product) return;
@@ -895,6 +772,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (interaction.isButton() && interaction.customId.startsWith('create_ticket_')) {
+            refreshDataFromDisk();
             const productId = parseInt(interaction.customId.split('_')[2], 10);
             const product = products.find((p) => p.id === productId);
             if (!product) return;
@@ -922,7 +800,10 @@ client.on('interactionCreate', async (interaction) => {
                 .get(interaction.channelId);
 
             if (!openTicket) {
-                await interaction.reply({ content: 'This ticket is already closed.', ephemeral: true });
+                await interaction.reply({
+                    content: 'This ticket is already closed.',
+                    ephemeral: true,
+                });
                 return;
             }
 
@@ -932,13 +813,21 @@ client.on('interactionCreate', async (interaction) => {
                 (STAFF_ROLE_ID && interaction.member.roles.cache.has(STAFF_ROLE_ID));
 
             if (!isOwner && !isStaff) {
-                await interaction.reply({ content: 'Only the ticket owner or staff can close this ticket.', ephemeral: true });
+                await interaction.reply({
+                    content: 'Only the ticket owner or staff can close this ticket.',
+                    ephemeral: true,
+                });
                 return;
             }
 
-            db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(interaction.channelId);
+            db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(
+                interaction.channelId
+            );
 
-            await interaction.reply({ content: '🔒 Ticket will be closed in 5 seconds...', ephemeral: false });
+            await interaction.reply({
+                content: '🔒 Ticket will be closed in 5 seconds...',
+                ephemeral: false,
+            });
 
             setTimeout(async () => {
                 try {
@@ -952,18 +841,22 @@ client.on('interactionCreate', async (interaction) => {
 
         if (interaction.isChatInputCommand() && interaction.commandName === 'status-now') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-                await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+                await interaction.reply({
+                    content: 'You do not have permission to use this command.',
+                    ephemeral: true,
+                });
                 return;
             }
 
             await interaction.deferReply({ ephemeral: true });
 
-            const { timeKey } = getUsDateTimeParts();
+            const { timeKey } = getZonedDateTimeParts();
             const message = await postDailyStatus(`manual-${timeKey}`, { force: true });
 
             if (!message) {
                 await interaction.editReply({
-                    content: '❌ Failed to post. Check STATUS_CHANNEL_ID in .env and bot permissions.',
+                    content:
+                        '❌ Failed to post. Check STATUS_CHANNEL_ID in .env and bot permissions.',
                 });
                 return;
             }
@@ -972,9 +865,28 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
+        if (interaction.isChatInputCommand() && interaction.commandName === 'reload-data') {
+            if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+                await interaction.reply({
+                    content: 'You do not have permission to use this command.',
+                    ephemeral: true,
+                });
+                return;
+            }
+            const data = refreshDataFromDisk();
+            await interaction.reply({
+                content: `✅ Reloaded data: **${data.products.length}** products, **${data.firmwareSupportStatus.length}** firmware rows.`,
+                ephemeral: true,
+            });
+            return;
+        }
+
         if (interaction.isChatInputCommand() && interaction.commandName === 'announce') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-                await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+                await interaction.reply({
+                    content: 'You do not have permission to use this command.',
+                    ephemeral: true,
+                });
                 return;
             }
 
@@ -1009,5 +921,10 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 });
+
+if (!TOKEN || !CLIENT_ID) {
+    console.error('TOKEN and CLIENT_ID are required. Set them in .env or Railway variables.');
+    process.exit(1);
+}
 
 client.login(TOKEN).catch((err) => console.error('Login failed:', err));

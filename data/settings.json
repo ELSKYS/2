@@ -1,0 +1,11 @@
+{
+  "brand_name": "RED DMA",
+  "brand_tagline": "Premium DMA Firmware",
+  "website": "https://reddma.xyz",
+  "status_dm_discount": "10%",
+  "status_timezone": "UTC",
+  "status_post_times": ["12:00"],
+  "status_message_ttl_minutes": 10,
+  "ticket_welcome_text": "Welcome! Your order has been created. A staff member will assist you shortly. Please wait and do not share payment details in public channels.",
+  "order_instructions": "A staff member will contact you with the next steps for this order. Please stay in this ticket channel."
+}

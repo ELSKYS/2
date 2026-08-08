@@ -1,0 +1,11 @@
+[
+  { "name": "Universal Firmware", "note": "EAC / VGK / BE" },
+  { "name": "Universal PRO", "note": "All Games" },
+  { "name": "Specific Firmware", "note": "BE / JAVELIN / GC / VAC" },
+  { "name": "EAC Basic", "note": "Rust / Apex / FN" },
+  { "name": "EAC Rank", "note": "FN Ranked & Cup" },
+  { "name": "Faceit", "note": "With & Without Warranty" },
+  { "name": "VGK", "note": "Vanguard" },
+  { "name": "Hidden", "note": "FiveM / Free Fire" },
+  { "name": "RDMA Day / Week / Month Card", "note": "VGK / EAC / BE" }
+]
