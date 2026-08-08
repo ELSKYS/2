@@ -230,19 +230,75 @@ function buildTicketPermissions(guild, userId) {
     return overwrites;
 }
 
+const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
+
+function countChannelsInCategory(guild, categoryId) {
+    if (!categoryId) return 0;
+    return guild.channels.cache.filter(
+        (ch) => ch.parentId === categoryId
+    ).size;
+}
+
+function categoryHasRoom(guild, categoryId) {
+    return countChannelsInCategory(guild, categoryId) < DISCORD_CATEGORY_CHANNEL_LIMIT;
+}
+
 async function resolveTicketCategory(guild) {
+    // Prefer configured category if it still has free slots
     if (TICKET_CATEGORY_ID) {
         const category = guild.channels.cache.get(TICKET_CATEGORY_ID);
-        if (category?.type === ChannelType.GuildCategory) return category.id;
+        if (category?.type === ChannelType.GuildCategory) {
+            if (categoryHasRoom(guild, category.id)) return category.id;
+        }
     }
 
-    const namedCategory = guild.channels.cache.find(
-        (ch) =>
-            ch.type === ChannelType.GuildCategory &&
-            /ticket|support|purchase|order|工单/i.test(ch.name)
-    );
+    // Prefer named ticket categories that still have room
+    const namedCategories = guild.channels.cache
+        .filter(
+            (ch) =>
+                ch.type === ChannelType.GuildCategory &&
+                /ticket|support|purchase|order|工单/i.test(ch.name)
+        )
+        .sort((a, b) => a.rawPosition - b.rawPosition);
 
-    return namedCategory?.id ?? null;
+    for (const cat of namedCategories.values()) {
+        if (categoryHasRoom(guild, cat.id)) return cat.id;
+    }
+
+    // Overflow categories: Tickets (2), Tickets (3), ...
+    for (let n = 2; n <= 20; n++) {
+        const overflowName = `Tickets (${n})`;
+        const existing = guild.channels.cache.find(
+            (ch) =>
+                ch.type === ChannelType.GuildCategory &&
+                ch.name.toLowerCase() === overflowName.toLowerCase()
+        );
+        if (existing) {
+            if (categoryHasRoom(guild, existing.id)) return existing.id;
+            continue;
+        }
+        // Create a new overflow category
+        try {
+            const created = await guild.channels.create({
+                name: overflowName,
+                type: ChannelType.GuildCategory,
+                reason: 'Ticket category full (Discord 50 channels/category limit)',
+            });
+            console.log(
+                `Created overflow ticket category #${overflowName} (${created.id})`
+            );
+            return created.id;
+        } catch (err) {
+            console.error('Failed to create overflow ticket category:', err);
+            break;
+        }
+    }
+
+    // Last resort: no parent (channel at guild root)
+    console.warn(
+        'All ticket categories are full or unavailable; creating ticket without category parent'
+    );
+    return null;
 }
 
 async function sendTicketWelcome(ticketChannel, user, product) {
@@ -264,27 +320,81 @@ async function sendTicketWelcome(ticketChannel, user, product) {
     });
 }
 
+async function createGuildTicketChannel(guild, channelName, user, product, parentId) {
+    return guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        parent: parentId ?? undefined,
+        topic: `${BRAND_NAME} purchase ticket for ${user.tag} • ${product.name}`,
+        permissionOverwrites: buildTicketPermissions(guild, user.id),
+        reason: `Purchase ticket for ${user.tag}`,
+    });
+}
+
 async function createTicketChannel(guild, user, product, sourceChannelId = null) {
     const existing = getOpenTicketForUser(user.id);
     if (existing) {
-        const existingChannel = guild.channels.cache.get(existing.ticket_id);
+        // Prefer cache, then API fetch (cache may be incomplete after restart)
+        let existingChannel =
+            guild.channels.cache.get(existing.ticket_id) ||
+            (await guild.channels.fetch(existing.ticket_id).catch(() => null));
         if (existingChannel) {
             return { channel: existingChannel, created: false };
         }
+        // Stale DB row pointing at a deleted channel — mark closed
+        db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(
+            existing.ticket_id
+        );
+        console.log(`Closed stale ticket row for missing channel ${existing.ticket_id}`);
     }
 
-    const categoryId = await resolveTicketCategory(guild);
     const shortProduct = sanitizeChannelName(product.name).slice(0, 24);
     const shortUser = sanitizeChannelName(user.username).slice(0, 16);
     const channelName = `purchase-${shortUser}-${shortProduct}`.slice(0, 100);
 
-    const ticketChannel = await guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        parent: categoryId ?? undefined,
-        topic: `${BRAND_NAME} purchase ticket for ${user.tag} • ${product.name}`,
-        permissionOverwrites: buildTicketPermissions(guild, user.id),
-    });
+    let categoryId = await resolveTicketCategory(guild);
+    let ticketChannel;
+
+    try {
+        ticketChannel = await createGuildTicketChannel(
+            guild,
+            channelName,
+            user,
+            product,
+            categoryId
+        );
+    } catch (err) {
+        const msg = String(err?.message || err);
+        const isCategoryFull =
+            err?.code === 50035 ||
+            /CHANNEL_PARENT_MAX_CHANNELS|Maximum number of channels in category/i.test(msg);
+
+        if (!isCategoryFull) throw err;
+
+        console.warn(
+            `Ticket category full (${categoryId}); retrying with overflow category...`
+        );
+        // Force-create overflow and retry once, then bare channel
+        categoryId = await resolveTicketCategory(guild);
+        try {
+            ticketChannel = await createGuildTicketChannel(
+                guild,
+                channelName,
+                user,
+                product,
+                categoryId
+            );
+        } catch (err2) {
+            console.warn('Retry with category failed; creating ticket without parent', err2);
+            ticketChannel = await createGuildTicketChannel(
+                guild,
+                channelName,
+                user,
+                product,
+                null
+            );
+        }
+    }
 
     db.prepare(
         'INSERT INTO tickets (ticket_id, user_id, product_name, product_id, source_channel_id) VALUES (?, ?, ?, ?, ?)'
