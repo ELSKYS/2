@@ -234,71 +234,109 @@ const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
 
 function countChannelsInCategory(guild, categoryId) {
     if (!categoryId) return 0;
-    return guild.channels.cache.filter(
-        (ch) => ch.parentId === categoryId
-    ).size;
+    return guild.channels.cache.filter((ch) => ch.parentId === categoryId).size;
 }
 
 function categoryHasRoom(guild, categoryId) {
     return countChannelsInCategory(guild, categoryId) < DISCORD_CATEGORY_CHANNEL_LIMIT;
 }
 
-async function resolveTicketCategory(guild) {
-    // Prefer configured category if it still has free slots
-    if (TICKET_CATEGORY_ID) {
-        const category = guild.channels.cache.get(TICKET_CATEGORY_ID);
-        if (category?.type === ChannelType.GuildCategory) {
-            if (categoryHasRoom(guild, category.id)) return category.id;
-        }
+function isTicketChannelName(name) {
+    if (!name) return false;
+    return (
+        name.startsWith('purchase-') ||
+        name.startsWith('ticket-') ||
+        /support|purchase/i.test(name)
+    );
+}
+
+/**
+ * Free slots under the configured ticket category by deleting channels that are
+ * safe to remove: DB-closed tickets, or leftover purchase-* with no open DB row.
+ * Never deletes channels that are still marked open in SQLite.
+ */
+async function freeSpaceInTicketCategory(guild, categoryId, needSlots = 3) {
+    try {
+        await guild.channels.fetch();
+    } catch (err) {
+        console.warn('guild.channels.fetch failed:', err?.message || err);
     }
 
-    // Prefer named ticket categories that still have room
-    const namedCategories = guild.channels.cache
+    let used = countChannelsInCategory(guild, categoryId);
+    if (used < DISCORD_CATEGORY_CHANNEL_LIMIT) {
+        return DISCORD_CATEGORY_CHANNEL_LIMIT - used;
+    }
+
+    const children = [...guild.channels.cache.values()]
         .filter(
             (ch) =>
-                ch.type === ChannelType.GuildCategory &&
-                /ticket|support|purchase|order|工单/i.test(ch.name)
+                ch.parentId === categoryId &&
+                ch.type === ChannelType.GuildText &&
+                isTicketChannelName(ch.name)
         )
-        .sort((a, b) => a.rawPosition - b.rawPosition);
+        .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0));
 
-    for (const cat of namedCategories.values()) {
-        if (categoryHasRoom(guild, cat.id)) return cat.id;
-    }
+    let freed = 0;
+    for (const ch of children) {
+        if (used - freed < DISCORD_CATEGORY_CHANNEL_LIMIT - needSlots + 1) break;
 
-    // Overflow categories: Tickets (2), Tickets (3), ...
-    for (let n = 2; n <= 20; n++) {
-        const overflowName = `Tickets (${n})`;
-        const existing = guild.channels.cache.find(
-            (ch) =>
-                ch.type === ChannelType.GuildCategory &&
-                ch.name.toLowerCase() === overflowName.toLowerCase()
-        );
-        if (existing) {
-            if (categoryHasRoom(guild, existing.id)) return existing.id;
-            continue;
-        }
-        // Create a new overflow category
+        const row = db
+            .prepare('SELECT status FROM tickets WHERE ticket_id = ? ORDER BY id DESC LIMIT 1')
+            .get(ch.id);
+
+        // Safe to remove: closed in DB, or never tracked / not open (leftover after redeploy)
+        const safe = !row || row.status === 'closed';
+        if (!safe) continue;
+
         try {
-            const created = await guild.channels.create({
-                name: overflowName,
-                type: ChannelType.GuildCategory,
-                reason: 'Ticket category full (Discord 50 channels/category limit)',
-            });
-            console.log(
-                `Created overflow ticket category #${overflowName} (${created.id})`
-            );
-            return created.id;
+            await ch.delete('Free space in ticket category (auto-cleanup)');
+            freed += 1;
+            console.log(`Auto-cleaned ticket channel #${ch.name} (${ch.id})`);
         } catch (err) {
-            console.error('Failed to create overflow ticket category:', err);
-            break;
+            console.warn(`Failed to delete #${ch.name}:`, err?.message || err);
         }
     }
 
-    // Last resort: no parent (channel at guild root)
-    console.warn(
-        'All ticket categories are full or unavailable; creating ticket without category parent'
+    used = countChannelsInCategory(guild, categoryId);
+    console.log(
+        `Ticket category ${categoryId}: after cleanup used=${used}/${DISCORD_CATEGORY_CHANNEL_LIMIT}, freed=${freed}`
     );
-    return null;
+    return DISCORD_CATEGORY_CHANNEL_LIMIT - used;
+}
+
+/**
+ * ALWAYS prefer TICKET_CATEGORY_ID when set (user-configured parent).
+ * If full, try auto-cleanup first — do NOT silently open tickets under another category.
+ */
+async function resolveTicketCategory(guild) {
+    if (TICKET_CATEGORY_ID) {
+        let category =
+            guild.channels.cache.get(TICKET_CATEGORY_ID) ||
+            (await guild.channels.fetch(TICKET_CATEGORY_ID).catch(() => null));
+
+        if (category?.type === ChannelType.GuildCategory) {
+            if (!categoryHasRoom(guild, category.id)) {
+                await freeSpaceInTicketCategory(guild, category.id, 5);
+            }
+            // Still return this category even if full — create will surface a clear error
+            console.log(
+                `Using configured ticket category ${category.id} (channels: ${countChannelsInCategory(guild, category.id)}/${DISCORD_CATEGORY_CHANNEL_LIMIT})`
+            );
+            return category.id;
+        }
+        console.error(
+            `TICKET_CATEGORY_ID=${TICKET_CATEGORY_ID} is missing or not a category`
+        );
+    }
+
+    // Fallback only when env not set
+    const named = guild.channels.cache.find(
+        (ch) =>
+            ch.type === ChannelType.GuildCategory &&
+            /ticket|support|purchase|order|工单/i.test(ch.name) &&
+            categoryHasRoom(guild, ch.id)
+    );
+    return named?.id ?? null;
 }
 
 async function sendTicketWelcome(ticketChannel, user, product) {
@@ -332,27 +370,32 @@ async function createGuildTicketChannel(guild, channelName, user, product, paren
 }
 
 async function createTicketChannel(guild, user, product, sourceChannelId = null) {
-    const existing = getOpenTicketForUser(user.id);
-    if (existing) {
-        // Prefer cache, then API fetch (cache may be incomplete after restart)
-        let existingChannel =
-            guild.channels.cache.get(existing.ticket_id) ||
-            (await guild.channels.fetch(existing.ticket_id).catch(() => null));
-        if (existingChannel) {
-            return { channel: existingChannel, created: false };
+    // Close ALL stale open rows for this user whose channels are gone
+    const openRows = db
+        .prepare(
+            "SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'open' ORDER BY id DESC"
+        )
+        .all(user.id);
+
+    for (const row of openRows) {
+        const ch =
+            guild.channels.cache.get(row.ticket_id) ||
+            (await guild.channels.fetch(row.ticket_id).catch(() => null));
+        if (ch) {
+            return { channel: ch, created: false };
         }
-        // Stale DB row pointing at a deleted channel — mark closed
         db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(
-            existing.ticket_id
+            row.ticket_id
         );
-        console.log(`Closed stale ticket row for missing channel ${existing.ticket_id}`);
+        console.log(`Closed stale ticket row for missing channel ${row.ticket_id}`);
     }
 
     const shortProduct = sanitizeChannelName(product.name).slice(0, 24);
     const shortUser = sanitizeChannelName(user.username).slice(0, 16);
     const channelName = `purchase-${shortUser}-${shortProduct}`.slice(0, 100);
 
-    let categoryId = await resolveTicketCategory(guild);
+    // Always use configured category when set — no silent overflow to other parents
+    const categoryId = await resolveTicketCategory(guild);
     let ticketChannel;
 
     try {
@@ -369,30 +412,29 @@ async function createTicketChannel(guild, user, product, sourceChannelId = null)
             err?.code === 50035 ||
             /CHANNEL_PARENT_MAX_CHANNELS|Maximum number of channels in category/i.test(msg);
 
-        if (!isCategoryFull) throw err;
-
-        console.warn(
-            `Ticket category full (${categoryId}); retrying with overflow category...`
-        );
-        // Force-create overflow and retry once, then bare channel
-        categoryId = await resolveTicketCategory(guild);
-        try {
-            ticketChannel = await createGuildTicketChannel(
-                guild,
-                channelName,
-                user,
-                product,
-                categoryId
+        if (isCategoryFull && categoryId) {
+            console.warn(
+                `Category ${categoryId} still full after resolve; forcing cleanup + retry once`
             );
-        } catch (err2) {
-            console.warn('Retry with category failed; creating ticket without parent', err2);
-            ticketChannel = await createGuildTicketChannel(
-                guild,
-                channelName,
-                user,
-                product,
-                null
-            );
+            await freeSpaceInTicketCategory(guild, categoryId, 5);
+            try {
+                ticketChannel = await createGuildTicketChannel(
+                    guild,
+                    channelName,
+                    user,
+                    product,
+                    categoryId
+                );
+            } catch (err2) {
+                const e = new Error(
+                    `工单分类已满 50 个频道（${categoryId}）。请删除旧的 purchase- 频道后再试。` +
+                        ` Discord: ${err2?.message || err2}`
+                );
+                e.code = 'TICKET_CATEGORY_FULL';
+                throw e;
+            }
+        } else {
+            throw err;
         }
     }
 
@@ -401,6 +443,10 @@ async function createTicketChannel(guild, user, product, sourceChannelId = null)
     ).run(ticketChannel.id, user.id, product.name, product.id, sourceChannelId);
 
     await sendTicketWelcome(ticketChannel, user, product);
+
+    console.log(
+        `Ticket created #${ticketChannel.name} parent=${ticketChannel.parentId} (want=${categoryId})`
+    );
 
     return { channel: ticketChannel, created: true };
 }
@@ -779,6 +825,23 @@ async function registerCommands() {
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
     console.log(`Loaded ${products.length} products from data/products.json`);
+    console.log(`TICKET_CATEGORY_ID=${TICKET_CATEGORY_ID || '(not set)'}`);
+
+    // Warm channel cache so category child counts are accurate
+    for (const [, guild] of client.guilds.cache) {
+        try {
+            await guild.channels.fetch();
+            if (TICKET_CATEGORY_ID) {
+                const n = countChannelsInCategory(guild, TICKET_CATEGORY_ID);
+                console.log(
+                    `Guild ${guild.name}: ticket category ${TICKET_CATEGORY_ID} has ${n}/${DISCORD_CATEGORY_CHANNEL_LIMIT} channels`
+                );
+            }
+        } catch (err) {
+            console.warn(`Failed to fetch channels for ${guild.name}:`, err?.message || err);
+        }
+    }
+
     await registerCommands();
     startDailyStatusScheduler();
 });
@@ -887,18 +950,25 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const { channel: ticketChannel, created } = await createTicketChannel(
-                interaction.guild,
-                interaction.user,
-                product,
-                interaction.channelId
-            );
+            try {
+                const { channel: ticketChannel, created } = await createTicketChannel(
+                    interaction.guild,
+                    interaction.user,
+                    product,
+                    interaction.channelId
+                );
 
-            const message = created
-                ? `✅ Ticket created: ${ticketChannel}`
-                : `ℹ️ You already have an open ticket: ${ticketChannel}`;
+                const message = created
+                    ? `✅ Ticket created: ${ticketChannel}`
+                    : `ℹ️ You already have an open ticket: ${ticketChannel}`;
 
-            await interaction.editReply({ content: message });
+                await interaction.editReply({ content: message });
+            } catch (err) {
+                console.error('buy_ create ticket failed:', err);
+                await interaction.editReply({
+                    content: `❌ 开票失败：${err?.message || err}`,
+                });
+            }
             return;
         }
 
@@ -910,40 +980,79 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const { channel: ticketChannel, created } = await createTicketChannel(
-                interaction.guild,
-                interaction.user,
-                product,
-                interaction.channelId
-            );
+            try {
+                const { channel: ticketChannel, created } = await createTicketChannel(
+                    interaction.guild,
+                    interaction.user,
+                    product,
+                    interaction.channelId
+                );
 
-            const message = created
-                ? `✅ Ticket created: ${ticketChannel}`
-                : `ℹ️ You already have an open ticket: ${ticketChannel}`;
+                const message = created
+                    ? `✅ Ticket created: ${ticketChannel}`
+                    : `ℹ️ You already have an open ticket: ${ticketChannel}`;
 
-            await interaction.editReply({ content: message });
+                await interaction.editReply({ content: message });
+            } catch (err) {
+                console.error('create_ticket_ failed:', err);
+                await interaction.editReply({
+                    content: `❌ 开票失败：${err?.message || err}`,
+                });
+            }
             return;
         }
 
         if (interaction.isButton() && interaction.customId === 'close_ticket') {
-            const openTicket = db
-                .prepare("SELECT * FROM tickets WHERE ticket_id = ? AND status = 'open'")
-                .get(interaction.channelId);
+            const channel = interaction.channel;
+            const channelId = interaction.channelId;
+            const channelName = channel?.name || '';
 
-            if (!openTicket) {
+            // DB is wiped on Railway redeploy — do NOT require an open row to close
+            const openTicket = db
+                .prepare(
+                    "SELECT * FROM tickets WHERE ticket_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1"
+                )
+                .get(channelId);
+            const anyTicketRow = db
+                .prepare(
+                    'SELECT * FROM tickets WHERE ticket_id = ? ORDER BY id DESC LIMIT 1'
+                )
+                .get(channelId);
+
+            const looksLikeTicket =
+                isTicketChannelName(channelName) ||
+                Boolean(openTicket) ||
+                Boolean(anyTicketRow) ||
+                (channel?.topic || '').includes('purchase ticket');
+
+            if (!looksLikeTicket) {
                 await interaction.reply({
-                    content: 'This ticket is already closed.',
+                    content: '这里不是工单频道，无法关闭。',
                     ephemeral: true,
                 });
                 return;
             }
 
-            const isOwner = openTicket.user_id === interaction.user.id;
+            const member = interaction.member;
+            const isOwner =
+                (openTicket && openTicket.user_id === interaction.user.id) ||
+                (anyTicketRow && anyTicketRow.user_id === interaction.user.id);
             const isStaff =
-                interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-                (STAFF_ROLE_ID && interaction.member.roles.cache.has(STAFF_ROLE_ID));
+                member.permissions.has(PermissionFlagsBits.Administrator) ||
+                member.permissions.has(PermissionFlagsBits.ManageChannels) ||
+                member.permissions.has(PermissionFlagsBits.ManageGuild) ||
+                (STAFF_ROLE_ID && member.roles.cache.has(STAFF_ROLE_ID));
 
-            if (!isOwner && !isStaff) {
+            // If no DB owner record (after redeploy), allow anyone who can see the private
+            // ticket channel AND is staff; also allow the mention target in topic is hard —
+            // allow ManageChannels OR anyone with View in channel who is not denied: prefer staff.
+            // Fallback: allow any guild member who can access this private channel (they were invited).
+            const canClose =
+                isOwner ||
+                isStaff ||
+                !openTicket; // after redeploy no row: let ticket participants close
+
+            if (!canClose) {
                 await interaction.reply({
                     content: 'Only the ticket owner or staff can close this ticket.',
                     ephemeral: true,
@@ -951,9 +1060,13 @@ client.on('interactionCreate', async (interaction) => {
                 return;
             }
 
-            db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(
-                interaction.channelId
-            );
+            try {
+                db.prepare(
+                    "UPDATE tickets SET status = 'closed' WHERE ticket_id = ?"
+                ).run(channelId);
+            } catch (err) {
+                console.warn('DB close update failed (ok if redeploy wiped DB):', err?.message);
+            }
 
             await interaction.reply({
                 content: '🔒 Ticket will be closed in 5 seconds...',
@@ -962,9 +1075,24 @@ client.on('interactionCreate', async (interaction) => {
 
             setTimeout(async () => {
                 try {
-                    await interaction.channel.delete('Ticket closed');
+                    const ch =
+                        interaction.guild.channels.cache.get(channelId) ||
+                        (await interaction.guild.channels.fetch(channelId).catch(() => null));
+                    if (ch) {
+                        await ch.delete('Ticket closed');
+                        console.log(`Deleted ticket channel ${channelId} (#${channelName})`);
+                    }
                 } catch (error) {
                     console.error('Failed to delete ticket channel:', error);
+                    try {
+                        await interaction.followUp({
+                            content:
+                                '❌ 无法删除频道。请确认机器人有「管理频道」权限，或由管理员手动删除。',
+                            ephemeral: true,
+                        });
+                    } catch {
+                        // ignore
+                    }
                 }
             }, 5000);
             return;
