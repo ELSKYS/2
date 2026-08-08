@@ -52,6 +52,20 @@ function refreshDataFromDisk() {
     return { products, firmwareSupportStatus, settings };
 }
 
+// Daily @everyone status: off unless explicitly enabled via env or settings.json
+function isDailyStatusEnabled() {
+    if (process.env.STATUS_ENABLED != null && process.env.STATUS_ENABLED !== '') {
+        return !['0', 'false', 'off', 'no'].includes(
+            String(process.env.STATUS_ENABLED).trim().toLowerCase()
+        );
+    }
+    if (typeof settings.daily_status_enabled === 'boolean') {
+        return settings.daily_status_enabled;
+    }
+    // Default: disabled
+    return false;
+}
+
 const STATUS_TIMEZONE =
     process.env.STATUS_TIMEZONE || settings.status_timezone || 'UTC';
 const STATUS_POST_TIMES = (
@@ -532,6 +546,13 @@ async function postDailyStatus(slot, { force = false } = {}) {
 let lastSchedulerTick = '';
 
 function startDailyStatusScheduler() {
+    refreshDataFromDisk();
+    if (!isDailyStatusEnabled()) {
+        console.log(
+            'Daily @everyone status scheduler is OFF (settings.daily_status_enabled=false or STATUS_ENABLED=false)'
+        );
+        return;
+    }
     if (!STATUS_CHANNEL_ID) {
         console.log('Daily status scheduler disabled (set STATUS_CHANNEL_ID in .env)');
         return;
@@ -843,6 +864,16 @@ client.on('interactionCreate', async (interaction) => {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
                 await interaction.reply({
                     content: 'You do not have permission to use this command.',
+                    ephemeral: true,
+                });
+                return;
+            }
+
+            refreshDataFromDisk();
+            if (!isDailyStatusEnabled()) {
+                await interaction.reply({
+                    content:
+                        '每日状态推送已关闭（daily_status_enabled=false）。如需临时推送，请先在设置里打开后再试。',
                     ephemeral: true,
                 });
                 return;
