@@ -581,23 +581,23 @@ function buildBuyButtonRows() {
 function buildTicketPanelPayload() {
     const rows = buildBuyButtonRows();
     const extra =
-        products.length > 25 ? '\n按钮最多显示 25 个产品，其余请使用 /buy。' : '';
+        products.length > 25
+            ? '\nOnly the first 25 products are shown here. Use /buy for the rest.'
+            : '';
     const description = products.length
-        ? '点击下方产品按钮，会在**本频道**开启一张私密购买工单帖。\n' +
-          '开单人和客服可以进入。在工单帖里 @ 成员，对方会被加入该工单。\n\n' +
-          'Click a product to open a private ticket thread in this channel. @mention a member inside the ticket to add them.' +
+        ? 'This channel is for opening a purchase ticket.\nClick a product below to start one.' +
           extra
-        : '当前没有可售产品。请管理员配置 data/products.json 后执行 /reload-data。';
+        : 'No products are available right now.';
 
     const embed = new EmbedBuilder()
-        .setTitle(`${BRAND_NAME} 购买工单`)
+        .setTitle(`${BRAND_NAME} Purchase Tickets`)
         .setDescription(description)
         .setImage(PRODUCT_IMAGE_URL)
         .setColor(0xef4444)
         .setFooter({ text: `${BRAND_NAME} • ${BRAND_TAGLINE} • ${TICKET_PANEL_MARKER}` });
 
     return {
-        content: '购买请点击下方按钮开启工单。',
+        content: 'Click a button below to open a purchase ticket.',
         embeds: [embed],
         components: rows,
         files: [getProductImageAttachment()],
