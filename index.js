@@ -22,9 +22,14 @@ const Database = require('better-sqlite3');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+// Guild text channel: the purchase panel is posted here, and each ticket is a thread under it.
+const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID || null;
+// Deprecated. Older builds created sibling text channels in this category. Ignored.
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || null;
 const STATUS_CHANNEL_ID = process.env.STATUS_CHANNEL_ID || null;
+const TICKET_PANEL_MARKER = 'ticket-panel:v1';
+const MAX_STAFF_THREAD_ADDS = 100;
 
 const DATA_DIR = path.join(__dirname, 'data');
 
@@ -136,6 +141,11 @@ db.exec(`
         posted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         delete_at INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS bot_kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 `);
 
 try {
@@ -192,55 +202,6 @@ function getOpenTicketForUser(userId) {
         .get(userId);
 }
 
-function buildTicketPermissions(guild, userId) {
-    const overwrites = [
-        { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-        {
-            id: userId,
-            allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.AttachFiles,
-            ],
-        },
-        {
-            id: client.user.id,
-            allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ManageChannels,
-                PermissionFlagsBits.ReadMessageHistory,
-            ],
-        },
-    ];
-
-    if (STAFF_ROLE_ID) {
-        overwrites.push({
-            id: STAFF_ROLE_ID,
-            allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.ManageMessages,
-            ],
-        });
-    }
-
-    return overwrites;
-}
-
-const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
-
-function countChannelsInCategory(guild, categoryId) {
-    if (!categoryId) return 0;
-    return guild.channels.cache.filter((ch) => ch.parentId === categoryId).size;
-}
-
-function categoryHasRoom(guild, categoryId) {
-    return countChannelsInCategory(guild, categoryId) < DISCORD_CATEGORY_CHANNEL_LIMIT;
-}
-
 function isTicketChannelName(name) {
     if (!name) return false;
     return (
@@ -250,98 +211,71 @@ function isTicketChannelName(name) {
     );
 }
 
-/**
- * Free slots under the configured ticket category by deleting channels that are
- * safe to remove: DB-closed tickets, or leftover purchase-* with no open DB row.
- * Never deletes channels that are still marked open in SQLite.
- */
-async function freeSpaceInTicketCategory(guild, categoryId, needSlots = 3) {
-    try {
-        await guild.channels.fetch();
-    } catch (err) {
-        console.warn('guild.channels.fetch failed:', err?.message || err);
-    }
-
-    let used = countChannelsInCategory(guild, categoryId);
-    if (used < DISCORD_CATEGORY_CHANNEL_LIMIT) {
-        return DISCORD_CATEGORY_CHANNEL_LIMIT - used;
-    }
-
-    const children = [...guild.channels.cache.values()]
-        .filter(
-            (ch) =>
-                ch.parentId === categoryId &&
-                ch.type === ChannelType.GuildText &&
-                isTicketChannelName(ch.name)
-        )
-        .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0));
-
-    let freed = 0;
-    for (const ch of children) {
-        if (used - freed < DISCORD_CATEGORY_CHANNEL_LIMIT - needSlots + 1) break;
-
-        const row = db
-            .prepare('SELECT status FROM tickets WHERE ticket_id = ? ORDER BY id DESC LIMIT 1')
-            .get(ch.id);
-
-        // Safe to remove: closed in DB, or never tracked / not open (leftover after redeploy)
-        const safe = !row || row.status === 'closed';
-        if (!safe) continue;
-
-        try {
-            await ch.delete('Free space in ticket category (auto-cleanup)');
-            freed += 1;
-            console.log(`Auto-cleaned ticket channel #${ch.name} (${ch.id})`);
-        } catch (err) {
-            console.warn(`Failed to delete #${ch.name}:`, err?.message || err);
-        }
-    }
-
-    used = countChannelsInCategory(guild, categoryId);
-    console.log(
-        `Ticket category ${categoryId}: after cleanup used=${used}/${DISCORD_CATEGORY_CHANNEL_LIMIT}, freed=${freed}`
-    );
-    return DISCORD_CATEGORY_CHANNEL_LIMIT - used;
+function rememberPanelMessage(channelId, messageId) {
+    db.prepare(
+        'INSERT INTO bot_kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    ).run(`ticket_panel:${channelId}`, messageId);
 }
 
-/**
- * ALWAYS prefer TICKET_CATEGORY_ID when set (user-configured parent).
- * If full, try auto-cleanup first — do NOT silently open tickets under another category.
- */
-async function resolveTicketCategory(guild) {
-    if (TICKET_CATEGORY_ID) {
-        let category =
-            guild.channels.cache.get(TICKET_CATEGORY_ID) ||
-            (await guild.channels.fetch(TICKET_CATEGORY_ID).catch(() => null));
+function recallPanelMessage(channelId) {
+    return (
+        db.prepare('SELECT value FROM bot_kv WHERE key = ?').get(`ticket_panel:${channelId}`)
+            ?.value || null
+    );
+}
 
-        if (category?.type === ChannelType.GuildCategory) {
-            if (!categoryHasRoom(guild, category.id)) {
-                await freeSpaceInTicketCategory(guild, category.id, 5);
-            }
-            // Still return this category even if full — create will surface a clear error
-            console.log(
-                `Using configured ticket category ${category.id} (channels: ${countChannelsInCategory(guild, category.id)}/${DISCORD_CATEGORY_CHANNEL_LIMIT})`
-            );
-            return category.id;
-        }
-        console.error(
-            `TICKET_CATEGORY_ID=${TICKET_CATEGORY_ID} is missing or not a category`
-        );
+function latestTicketRow(channelId) {
+    return db
+        .prepare('SELECT * FROM tickets WHERE ticket_id = ? ORDER BY id DESC LIMIT 1')
+        .get(channelId);
+}
+
+// Threads this bot created under the panel stay tickets even if the name was edited
+// or SQLite was wiped on redeploy.
+function isBotOwnedTicketThread(channel) {
+    return Boolean(
+        channel?.isThread?.() &&
+            client.user &&
+            channel.ownerId === client.user.id &&
+            TICKET_PANEL_CHANNEL_ID &&
+            channel.parentId === TICKET_PANEL_CHANNEL_ID
+    );
+}
+
+function isTrackedTicketName(name) {
+    if (!name) return false;
+    return name.startsWith('purchase-') || name.startsWith('ticket-');
+}
+
+function isActiveTicketChannel(channel) {
+    if (!channel?.guild) return false;
+    if (TICKET_PANEL_CHANNEL_ID && channel.id === TICKET_PANEL_CHANNEL_ID) return false;
+
+    const row = latestTicketRow(channel.id);
+    if (row) return row.status === 'open';
+
+    // No DB row (common after a Railway redeploy): only real ticket names, not every
+    // channel whose name happens to contain "support" or "purchase".
+    if (channel.isThread?.()) {
+        if (isBotOwnedTicketThread(channel)) return true;
+        if (!isTrackedTicketName(channel.name)) return false;
+        if (TICKET_PANEL_CHANNEL_ID && channel.parentId !== TICKET_PANEL_CHANNEL_ID) return false;
+        return true;
     }
 
-    // Fallback only when env not set
-    const named = guild.channels.cache.find(
-        (ch) =>
-            ch.type === ChannelType.GuildCategory &&
-            /ticket|support|purchase|order|工单/i.test(ch.name) &&
-            categoryHasRoom(guild, ch.id)
-    );
-    return named?.id ?? null;
+    return channel.type === ChannelType.GuildText && isTrackedTicketName(channel.name);
 }
 
 async function sendTicketWelcome(ticketChannel, user, product) {
     const image = getProductImageAttachment();
     const orderEmbed = buildOrderEmbed(product);
+    const isPrivate = ticketChannel.type === ChannelType.PrivateThread;
+    const guildId = ticketChannel.guild?.id;
+    const staffRoleId = STAFF_ROLE_ID && STAFF_ROLE_ID !== guildId ? STAFF_ROLE_ID : null;
+    const staffPing = staffRoleId ? ` <@&${staffRoleId}>` : '';
+    const visibilityNote = isPrivate
+        ? '在本工单内直接 @ 成员，对方会被加入这个私密帖。'
+        : '⚠️ 此工单是公开帖（私密帖未能创建）。能看到本频道的成员都能阅读对话。在帖内 @ 成员仍会把对方加入该帖。';
 
     const closeBtn = new ButtonBuilder()
         .setCustomId('close_ticket')
@@ -351,26 +285,174 @@ async function sendTicketWelcome(ticketChannel, user, product) {
     const row = new ActionRowBuilder().addComponents(closeBtn);
 
     await ticketChannel.send({
-        content: `<@${user.id}> ${TICKET_WELCOME_TEXT}`,
+        content: `<@${user.id}>${staffPing} ${TICKET_WELCOME_TEXT}\n${visibilityNote}`,
         embeds: [orderEmbed],
         files: [image],
         components: [row],
+        allowedMentions: {
+            parse: [],
+            users: [user.id],
+            roles: staffRoleId ? [staffRoleId] : [],
+        },
     });
 }
 
-async function createGuildTicketChannel(guild, channelName, user, product, parentId) {
-    return guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        parent: parentId ?? undefined,
-        topic: `${BRAND_NAME} purchase ticket for ${user.tag} • ${product.name}`,
-        permissionOverwrites: buildTicketPermissions(guild, user.id),
-        reason: `Purchase ticket for ${user.tag}`,
-    });
+async function fetchTicketChannel(guild, channelId) {
+    if (!channelId) return null;
+    const cached = guild.channels.cache.get(channelId);
+    if (cached) return cached;
+    return guild.channels.fetch(channelId).catch(() => null);
+}
+
+async function reviveThread(channel) {
+    if (!channel?.isThread?.()) return;
+    if (!channel.archived && !channel.locked) return;
+    try {
+        await channel.edit({
+            archived: false,
+            locked: false,
+            reason: 'Reopen active purchase ticket',
+        });
+    } catch (err) {
+        console.warn(`Could not reopen ticket thread ${channel.id}:`, err?.message || err);
+    }
+}
+
+// A guild text channel cannot parent another guild text channel. Tickets are threads.
+async function resolveTicketPanelChannel(guild) {
+    if (!TICKET_PANEL_CHANNEL_ID) {
+        const error = new Error(
+            '未配置 TICKET_PANEL_CHANNEL_ID。请把它设为购票文字频道 ID，工单会在该频道下创建帖子。'
+        );
+        error.code = 'TICKET_PANEL_UNCONFIGURED';
+        throw error;
+    }
+
+    const channel =
+        guild.channels.cache.get(TICKET_PANEL_CHANNEL_ID) ||
+        (await guild.channels.fetch(TICKET_PANEL_CHANNEL_ID).catch(() => null));
+
+    if (!channel || channel.type !== ChannelType.GuildText) {
+        const error = new Error(
+            `TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID} 不存在，或不是文字频道。工单帖只能建在文字频道下面。`
+        );
+        error.code = 'TICKET_PANEL_INVALID';
+        throw error;
+    }
+
+    if (channel.guildId !== guild.id) {
+        const error = new Error('购票面板频道不在当前服务器。');
+        error.code = 'TICKET_PANEL_WRONG_GUILD';
+        throw error;
+    }
+
+    return channel;
+}
+
+function isPrivateThreadUnavailable(err) {
+    const code = Number(err?.code);
+    // Permission, access, or invalid thread type / form body. Other errors (rate limit, 5xx)
+    // should not silently open a public ticket.
+    if (code === 50013 || code === 50001 || code === 50035 || code === 50024) return true;
+    const msg = String(err?.rawError?.message || err?.message || err);
+    return /Missing Permissions|Missing Access|CREATE_PRIVATE_THREADS|private thread|Invalid Form Body/i.test(
+        msg
+    );
+}
+
+async function createTicketThread(parent, name, reason) {
+    try {
+        return await parent.threads.create({
+            name,
+            type: ChannelType.PrivateThread,
+            invitable: true,
+            reason,
+        });
+    } catch (privateError) {
+        if (!isPrivateThreadUnavailable(privateError)) {
+            throw new Error(`无法创建私密工单帖：${privateError?.message || privateError}`);
+        }
+        console.warn(
+            'Private threads are unavailable; falling back to a public thread:',
+            privateError?.code,
+            privateError?.message || privateError
+        );
+        try {
+            return await parent.threads.create({
+                name,
+                type: ChannelType.PublicThread,
+                reason,
+            });
+        } catch (publicError) {
+            const error = new Error(
+                '无法创建工单帖。请确认机器人在购票文字频道拥有：查看频道、发送消息、嵌入链接、附加文件、创建私密帖、创建公开帖、在帖子中发送消息、管理帖子。' +
+                    ` 私密帖：${privateError?.message || privateError}；公开帖：${publicError?.message || publicError}`
+            );
+            error.code = 'TICKET_THREAD_FAILED';
+            throw error;
+        }
+    }
+}
+
+async function addUserToThread(thread, userId) {
+    if (!userId || userId === client.user?.id) return;
+    if (thread.members.cache.has(userId)) return;
+    await thread.members.add(userId);
+}
+
+async function addStaffRoleToThread(thread, guild, openerId) {
+    if (!STAFF_ROLE_ID || STAFF_ROLE_ID === guild.id) return 0;
+    if (thread.type !== ChannelType.PrivateThread) return 0;
+
+    let role = guild.roles.cache.get(STAFF_ROLE_ID) || null;
+    if (!role) role = await guild.roles.fetch(STAFF_ROLE_ID).catch(() => null);
+    if (!role) {
+        console.warn(
+            `STAFF_ROLE_ID=${STAFF_ROLE_ID} was not found. Staff were not added to the private ticket.`
+        );
+        return 0;
+    }
+
+    if (guild.memberCount && guild.members.cache.size < guild.memberCount) {
+        await guild.members.fetch().catch((err) => {
+            console.warn(
+                'Could not fetch guild members while adding staff to the ticket:',
+                err?.message || err
+            );
+        });
+    }
+
+    const humans = [...role.members.values()].filter(
+        (member) => member?.user && !member.user.bot && member.id !== openerId
+    );
+    if (!humans.length) {
+        console.warn(
+            `No members cached for staff role ${STAFF_ROLE_ID}. Enable the Server Members intent, or grant that role Manage Threads so staff can see private tickets.`
+        );
+        return 0;
+    }
+    if (humans.length > MAX_STAFF_THREAD_ADDS) {
+        console.warn(
+            `Staff role has ${humans.length} members; adding ${MAX_STAFF_THREAD_ADDS}. Give the role Manage Threads so the rest can open private tickets.`
+        );
+    }
+
+    let added = 0;
+    for (const member of humans.slice(0, MAX_STAFF_THREAD_ADDS)) {
+        try {
+            await addUserToThread(thread, member.id);
+            added += 1;
+        } catch (err) {
+            console.warn(
+                `Could not add staff member ${member.id} to ticket thread:`,
+                err?.message || err
+            );
+        }
+    }
+    return added;
 }
 
 async function createTicketChannel(guild, user, product, sourceChannelId = null) {
-    // Close ALL stale open rows for this user whose channels are gone
     const openRows = db
         .prepare(
             "SELECT ticket_id FROM tickets WHERE user_id = ? AND status = 'open' ORDER BY id DESC"
@@ -378,77 +460,231 @@ async function createTicketChannel(guild, user, product, sourceChannelId = null)
         .all(user.id);
 
     for (const row of openRows) {
-        const ch =
-            guild.channels.cache.get(row.ticket_id) ||
-            (await guild.channels.fetch(row.ticket_id).catch(() => null));
+        const ch = await fetchTicketChannel(guild, row.ticket_id);
         if (ch) {
+            await reviveThread(ch);
+            if (ch.isThread?.()) {
+                const recent = await ch.messages.fetch({ limit: 1 }).catch(() => null);
+                if (recent && recent.size === 0) {
+                    await sendTicketWelcome(ch, user, product).catch((err) =>
+                        console.error('Ticket welcome retry failed:', err)
+                    );
+                }
+            }
             return { channel: ch, created: false };
         }
-        db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(
-            row.ticket_id
-        );
+        db.prepare("UPDATE tickets SET status = 'closed' WHERE ticket_id = ?").run(row.ticket_id);
         console.log(`Closed stale ticket row for missing channel ${row.ticket_id}`);
     }
 
+    const parent = await resolveTicketPanelChannel(guild);
     const shortProduct = sanitizeChannelName(product.name).slice(0, 24);
     const shortUser = sanitizeChannelName(user.username).slice(0, 16);
-    const channelName = `purchase-${shortUser}-${shortProduct}`.slice(0, 100);
+    const threadName = `purchase-${shortUser}-${shortProduct}`.slice(0, 100);
 
-    // Always use configured category when set — no silent overflow to other parents
-    const categoryId = await resolveTicketCategory(guild);
-    let ticketChannel;
+    const thread = await createTicketThread(parent, threadName, `Purchase ticket for ${user.tag}`);
 
     try {
-        ticketChannel = await createGuildTicketChannel(
-            guild,
-            channelName,
-            user,
-            product,
-            categoryId
-        );
+        await addUserToThread(thread, user.id);
     } catch (err) {
-        const msg = String(err?.message || err);
-        const isCategoryFull =
-            err?.code === 50035 ||
-            /CHANNEL_PARENT_MAX_CHANNELS|Maximum number of channels in category/i.test(msg);
-
-        if (isCategoryFull && categoryId) {
-            console.warn(
-                `Category ${categoryId} still full after resolve; forcing cleanup + retry once`
-            );
-            await freeSpaceInTicketCategory(guild, categoryId, 5);
-            try {
-                ticketChannel = await createGuildTicketChannel(
-                    guild,
-                    channelName,
-                    user,
-                    product,
-                    categoryId
-                );
-            } catch (err2) {
-                const e = new Error(
-                    `工单分类已满 50 个频道（${categoryId}）。请删除旧的 purchase- 频道后再试。` +
-                        ` Discord: ${err2?.message || err2}`
-                );
-                e.code = 'TICKET_CATEGORY_FULL';
-                throw e;
-            }
-        } else {
-            throw err;
-        }
+        await thread.delete('Rolling back ticket thread; opener could not be added').catch((deleteErr) => {
+            console.warn(`Could not delete orphan ticket thread ${thread.id}:`, deleteErr?.message || deleteErr);
+        });
+        throw new Error(
+            `无法把你加入工单帖。请确认你能查看购票频道，并且拥有「在帖子中发送消息」。${err?.message || err}`
+        );
     }
+
+    const staffAdded = await addStaffRoleToThread(thread, guild, user.id).catch((err) => {
+        console.warn('Adding staff to the ticket thread failed:', err?.message || err);
+        return 0;
+    });
 
     db.prepare(
         'INSERT INTO tickets (ticket_id, user_id, product_name, product_id, source_channel_id) VALUES (?, ?, ?, ?, ?)'
-    ).run(ticketChannel.id, user.id, product.name, product.id, sourceChannelId);
+    ).run(thread.id, user.id, product.name, product.id, sourceChannelId);
 
-    await sendTicketWelcome(ticketChannel, user, product);
+    try {
+        await sendTicketWelcome(thread, user, product);
+    } catch (err) {
+        console.error('Ticket welcome failed:', err);
+    }
 
     console.log(
-        `Ticket created #${ticketChannel.name} parent=${ticketChannel.parentId} (want=${categoryId})`
+        `Ticket thread created #${thread.name} id=${thread.id} parent=${thread.parentId} type=${thread.type} staffAdded=${staffAdded}`
     );
 
-    return { channel: ticketChannel, created: true };
+    return { channel: thread, created: true };
+}
+
+function isTicketPanelMessage(message) {
+    if (!message?.author || !client.user || message.author.id !== client.user.id) return false;
+    return (message.embeds || []).some((embed) =>
+        (embed.footer?.text || '').includes(TICKET_PANEL_MARKER)
+    );
+}
+
+function buildBuyButtonRows() {
+    const list = products.slice(0, 25);
+    if (products.length > 25) {
+        console.warn(
+            `Only the first 25 products are shown on ticket buttons (${products.length} configured).`
+        );
+    }
+
+    const rows = [];
+    for (let i = 0; i < list.length; i += 5) {
+        const row = new ActionRowBuilder();
+        list.slice(i, i + 5).forEach((p) => {
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`buy_${p.id}`)
+                    .setLabel((`${p.name} - ${p.price}`.trim() || `Product ${p.id}`).slice(0, 80))
+                    .setStyle(ButtonStyle.Success)
+            );
+        });
+        rows.push(row);
+    }
+    return rows;
+}
+
+function buildTicketPanelPayload() {
+    const rows = buildBuyButtonRows();
+    const extra =
+        products.length > 25 ? '\n按钮最多显示 25 个产品，其余请使用 /buy。' : '';
+    const description = products.length
+        ? '点击下方产品按钮，会在**本频道**开启一张私密购买工单帖。\n' +
+          '开单人和客服可以进入。在工单帖里 @ 成员，对方会被加入该工单。\n\n' +
+          'Click a product to open a private ticket thread in this channel. @mention a member inside the ticket to add them.' +
+          extra
+        : '当前没有可售产品。请管理员配置 data/products.json 后执行 /reload-data。';
+
+    const embed = new EmbedBuilder()
+        .setTitle(`${BRAND_NAME} 购买工单`)
+        .setDescription(description)
+        .setImage(PRODUCT_IMAGE_URL)
+        .setColor(0xef4444)
+        .setFooter({ text: `${BRAND_NAME} • ${BRAND_TAGLINE} • ${TICKET_PANEL_MARKER}` });
+
+    return {
+        content: '购买请点击下方按钮开启工单。',
+        embeds: [embed],
+        components: rows,
+        files: [getProductImageAttachment()],
+        allowedMentions: { parse: [] },
+    };
+}
+
+async function collectPanelScanMessages(channel) {
+    const found = new Map();
+    const add = (msg) => {
+        if (msg) found.set(msg.id, msg);
+    };
+
+    const pinned = await channel.messages.fetchPinned().catch((err) => {
+        console.warn('Could not fetch pinned messages:', err?.message || err);
+        return null;
+    });
+    pinned?.forEach((msg) => add(msg));
+
+    let before;
+    for (let page = 0; page < 3; page += 1) {
+        const batch = await channel.messages.fetch({ limit: 100, before }).catch((err) => {
+            console.warn('Could not scan channel messages for the ticket panel:', err?.message || err);
+            return null;
+        });
+        if (!batch || batch.size === 0) break;
+        batch.forEach((msg) => add(msg));
+        before = batch.last()?.id;
+        if (batch.size < 100) break;
+    }
+
+    return found;
+}
+
+async function ensureTicketPanel() {
+    try {
+        refreshDataFromDisk();
+        if (!TICKET_PANEL_CHANNEL_ID) {
+            console.error(
+                'TICKET_PANEL_CHANNEL_ID is not set. Skipping the ticket panel. Set it to the guild text channel where tickets should open.'
+            );
+            return null;
+        }
+
+        const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID).catch(() => null);
+        if (!channel || channel.type !== ChannelType.GuildText) {
+            console.error(
+                `TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID} is missing or not a guild text channel (type=${channel?.type}). Ticket panel was not posted.`
+            );
+            return null;
+        }
+
+        const storedId = recallPanelMessage(channel.id);
+        const scanned = await collectPanelScanMessages(channel);
+        if (storedId && !scanned.has(storedId)) {
+            const stored = await channel.messages.fetch(storedId).catch(() => null);
+            if (stored) scanned.set(stored.id, stored);
+        }
+
+        const panels = [...scanned.values()]
+            .filter((msg) => isTicketPanelMessage(msg))
+            .sort((a, b) => (b.createdTimestamp || 0) - (a.createdTimestamp || 0));
+
+        let keeper = null;
+        if (storedId) keeper = panels.find((msg) => msg.id === storedId) || null;
+        if (!keeper) keeper = panels.find((msg) => msg.pinned) || null;
+        if (!keeper) keeper = panels[0] || null;
+
+        const payload = buildTicketPanelPayload();
+        let panelMessage = keeper;
+        if (panelMessage) {
+            try {
+                panelMessage = await panelMessage.edit({ ...payload, attachments: [] });
+            } catch (err) {
+                console.warn(
+                    'Could not refresh the existing ticket panel; leaving it in place:',
+                    err?.message || err
+                );
+            }
+        } else {
+            panelMessage = await channel.send(payload);
+        }
+
+        for (const extra of panels) {
+            if (extra.id === panelMessage.id) continue;
+            await extra.delete().catch((err) => {
+                console.warn(
+                    `Could not delete duplicate ticket panel ${extra.id}:`,
+                    err?.message || err
+                );
+            });
+        }
+
+        if (!panelMessage.pinned) {
+            await panelMessage.pin('Keep the purchase ticket panel easy to find').catch((err) => {
+                console.warn(
+                    'Could not pin the ticket panel (need Manage Messages):',
+                    err?.message || err
+                );
+            });
+        }
+
+        rememberPanelMessage(channel.id, panelMessage.id);
+        console.log(
+            `Ticket panel ready in #${channel.name} (${channel.id}) message=${panelMessage.id}`
+        );
+        return panelMessage;
+    } catch (err) {
+        console.error('Failed to ensure ticket panel:', err);
+        return null;
+    }
+}
+
+function ticketOpenReply(channel, created) {
+    return created
+        ? `✅ 已创建工单帖：${channel}`
+        : `ℹ️ 你已有一个未关闭的工单：${channel}`;
 }
 
 function buildProductCardRow(product) {
@@ -460,11 +696,102 @@ function buildProductCardRow(product) {
     return new ActionRowBuilder().addComponents(ticketBtn);
 }
 
-// Legacy ticket channels: first user message gets product list (no payment info)
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+function explicitMentionIds(content) {
+    const ids = [];
+    const re = /<@!?(\d{15,20})>/g;
+    let match = re.exec(content || '');
+    while (match) {
+        if (!ids.includes(match[1])) ids.push(match[1]);
+        match = re.exec(content || '');
+    }
+    return ids;
+}
 
-    const channelName = message.channel.name;
+// Real @mentions only. Reply pings are not in the message body, so they are not invites.
+function explicitlyMentionedUsers(message) {
+    const ids = new Set(explicitMentionIds(message.content));
+    if (!ids.size) return [];
+    return [...message.mentions.users.values()].filter((user) => ids.has(user.id));
+}
+
+async function inviteMentionedUsers(message) {
+    const channel = message.channel;
+    if (!isActiveTicketChannel(channel)) return;
+
+    const mentioned = explicitlyMentionedUsers(message).filter(
+        (user) =>
+            user &&
+            !user.bot &&
+            user.id !== message.author.id &&
+            user.id !== client.user?.id
+    );
+    if (!mentioned.length) return;
+
+    if (channel.isThread?.() && (channel.archived || channel.locked)) {
+        await reviveThread(channel);
+    }
+
+    for (const user of mentioned) {
+        try {
+            if (channel.isThread?.()) {
+                if (channel.members.cache.has(user.id)) continue;
+                const existing = await channel.members.fetch(user.id).catch(() => null);
+                if (existing) continue;
+                await channel.members.add(user.id);
+            } else {
+                const overwrite = channel.permissionOverwrites?.cache?.get(user.id);
+                const already =
+                    overwrite?.allow?.has(PermissionFlagsBits.ViewChannel) &&
+                    overwrite?.allow?.has(PermissionFlagsBits.SendMessages);
+                if (already) continue;
+                await channel.permissionOverwrites.edit(
+                    user.id,
+                    {
+                        ViewChannel: true,
+                        SendMessages: true,
+                        ReadMessageHistory: true,
+                        AttachFiles: true,
+                    },
+                    { reason: 'Mentioned inside an open purchase ticket' }
+                );
+            }
+
+            await channel.send({
+                content: `已将 <@${user.id}> 加入本工单。`,
+                allowedMentions: { parse: [], users: [user.id] },
+            });
+        } catch (err) {
+            console.warn(
+                `Failed to add ${user.tag || user.id} to ticket ${channel.id}:`,
+                err?.message || err
+            );
+            const reason = String(err?.message || err).slice(0, 180);
+            await channel
+                .send({
+                    content: `无法将 <@${user.id}> 加入本工单：${reason}`,
+                    allowedMentions: { parse: [] },
+                })
+                .catch(() => {});
+        }
+    }
+}
+
+// Legacy ticket text channels: first user message gets the product list.
+// New tickets are threads and already receive a welcome embed.
+client.on('messageCreate', async (message) => {
+    if (!message.author || message.author.bot || message.author.id === client.user?.id) return;
+    if (message.system) return;
+
+    try {
+        await inviteMentionedUsers(message);
+    } catch (error) {
+        console.error('Mention invite failed:', error);
+    }
+
+    if (message.channel?.isThread?.()) return;
+    if (TICKET_PANEL_CHANNEL_ID && message.channel?.id === TICKET_PANEL_CHANNEL_ID) return;
+
+    const channelName = message.channel?.name || '';
     const isTicketChannel =
         channelName.startsWith('purchase-') ||
         channelName.startsWith('ticket-') ||
@@ -825,23 +1152,22 @@ async function registerCommands() {
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
     console.log(`Loaded ${products.length} products from data/products.json`);
-    console.log(`TICKET_CATEGORY_ID=${TICKET_CATEGORY_ID || '(not set)'}`);
+    console.log(`TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID || '(not set)'}`);
+    if (TICKET_CATEGORY_ID) {
+        console.log(
+            `TICKET_CATEGORY_ID=${TICKET_CATEGORY_ID} is deprecated and ignored. Tickets are threads under TICKET_PANEL_CHANNEL_ID.`
+        );
+    }
 
-    // Warm channel cache so category child counts are accurate
     for (const [, guild] of client.guilds.cache) {
         try {
             await guild.channels.fetch();
-            if (TICKET_CATEGORY_ID) {
-                const n = countChannelsInCategory(guild, TICKET_CATEGORY_ID);
-                console.log(
-                    `Guild ${guild.name}: ticket category ${TICKET_CATEGORY_ID} has ${n}/${DISCORD_CATEGORY_CHANNEL_LIMIT} channels`
-                );
-            }
         } catch (err) {
             console.warn(`Failed to fetch channels for ${guild.name}:`, err?.message || err);
         }
     }
 
+    await ensureTicketPanel();
     await registerCommands();
     startDailyStatusScheduler();
 });
@@ -856,20 +1182,7 @@ client.on('interactionCreate', async (interaction) => {
                 .setImage(PRODUCT_IMAGE_URL)
                 .setColor('#ef4444');
 
-            const rows = [];
-            for (let i = 0; i < products.length; i += 5) {
-                const row = new ActionRowBuilder();
-                const chunk = products.slice(i, i + 5);
-                chunk.forEach((p) => {
-                    row.addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`buy_${p.id}`)
-                            .setLabel(`${p.name} - ${p.price}`.slice(0, 80))
-                            .setStyle(ButtonStyle.Success)
-                    );
-                });
-                rows.push(row);
-            }
+            const rows = buildBuyButtonRows();
 
             const image = getProductImageAttachment();
             await interaction.reply({
@@ -946,7 +1259,14 @@ client.on('interactionCreate', async (interaction) => {
             refreshDataFromDisk();
             const productId = parseInt(interaction.customId.split('_')[1], 10);
             const product = products.find((p) => p.id === productId);
-            if (!product) return;
+            if (!product) {
+                await interaction.reply({ content: '找不到该产品。', ephemeral: true });
+                return;
+            }
+            if (!interaction.guild) {
+                await interaction.reply({ content: '请在服务器里使用购票按钮。', ephemeral: true });
+                return;
+            }
 
             await interaction.deferReply({ ephemeral: true });
 
@@ -958,15 +1278,11 @@ client.on('interactionCreate', async (interaction) => {
                     interaction.channelId
                 );
 
-                const message = created
-                    ? `✅ Ticket created: ${ticketChannel}`
-                    : `ℹ️ You already have an open ticket: ${ticketChannel}`;
-
-                await interaction.editReply({ content: message });
+                await interaction.editReply({ content: ticketOpenReply(ticketChannel, created) });
             } catch (err) {
                 console.error('buy_ create ticket failed:', err);
                 await interaction.editReply({
-                    content: `❌ 开票失败：${err?.message || err}`,
+                    content: `❌ 开票失败：${String(err?.message || err).slice(0, 1500)}`,
                 });
             }
             return;
@@ -976,7 +1292,14 @@ client.on('interactionCreate', async (interaction) => {
             refreshDataFromDisk();
             const productId = parseInt(interaction.customId.split('_')[2], 10);
             const product = products.find((p) => p.id === productId);
-            if (!product) return;
+            if (!product) {
+                await interaction.reply({ content: '找不到该产品。', ephemeral: true });
+                return;
+            }
+            if (!interaction.guild) {
+                await interaction.reply({ content: '请在服务器里使用购票按钮。', ephemeral: true });
+                return;
+            }
 
             await interaction.deferReply({ ephemeral: true });
 
@@ -988,15 +1311,11 @@ client.on('interactionCreate', async (interaction) => {
                     interaction.channelId
                 );
 
-                const message = created
-                    ? `✅ Ticket created: ${ticketChannel}`
-                    : `ℹ️ You already have an open ticket: ${ticketChannel}`;
-
-                await interaction.editReply({ content: message });
+                await interaction.editReply({ content: ticketOpenReply(ticketChannel, created) });
             } catch (err) {
                 console.error('create_ticket_ failed:', err);
                 await interaction.editReply({
-                    content: `❌ 开票失败：${err?.message || err}`,
+                    content: `❌ 开票失败：${String(err?.message || err).slice(0, 1500)}`,
                 });
             }
             return;
@@ -1023,7 +1342,8 @@ client.on('interactionCreate', async (interaction) => {
                 isTicketChannelName(channelName) ||
                 Boolean(openTicket) ||
                 Boolean(anyTicketRow) ||
-                (channel?.topic || '').includes('purchase ticket');
+                (channel?.topic || '').includes('purchase ticket') ||
+                isBotOwnedTicketThread(channel);
 
             if (!looksLikeTicket) {
                 await interaction.reply({
@@ -1078,16 +1398,36 @@ client.on('interactionCreate', async (interaction) => {
                     const ch =
                         interaction.guild.channels.cache.get(channelId) ||
                         (await interaction.guild.channels.fetch(channelId).catch(() => null));
-                    if (ch) {
+                    if (!ch) return;
+                    try {
                         await ch.delete('Ticket closed');
-                        console.log(`Deleted ticket channel ${channelId} (#${channelName})`);
+                        console.log(`Deleted ticket ${channelId} (#${channelName})`);
+                    } catch (deleteErr) {
+                        if (!ch.isThread?.()) throw deleteErr;
+                        try {
+                            await ch.edit({
+                                archived: true,
+                                locked: true,
+                                reason: 'Ticket closed',
+                            });
+                            console.warn(
+                                `Could not delete ticket thread ${channelId}; archived it instead:`,
+                                deleteErr?.message || deleteErr
+                            );
+                        } catch (archiveErr) {
+                            console.warn(
+                                'Archive fallback failed:',
+                                archiveErr?.message || archiveErr
+                            );
+                            throw deleteErr;
+                        }
                     }
                 } catch (error) {
                     console.error('Failed to delete ticket channel:', error);
                     try {
                         await interaction.followUp({
                             content:
-                                '❌ 无法删除频道。请确认机器人有「管理频道」权限，或由管理员手动删除。',
+                                '❌ 无法关闭工单。请确认机器人拥有「管理帖子」或「管理频道」权限，或让管理员手动删除/归档。',
                             ephemeral: true,
                         });
                     } catch {
@@ -1143,8 +1483,13 @@ client.on('interactionCreate', async (interaction) => {
                 return;
             }
             const data = refreshDataFromDisk();
+            const panel = await ensureTicketPanel();
             await interaction.reply({
-                content: `✅ Reloaded data: **${data.products.length}** products, **${data.firmwareSupportStatus.length}** firmware rows.`,
+                content:
+                    `✅ Reloaded data: **${data.products.length}** products, **${data.firmwareSupportStatus.length}** firmware rows.` +
+                    (panel
+                        ? `\n购票面板已更新：${panel.url}`
+                        : '\n购票面板未更新，请检查 TICKET_PANEL_CHANNEL_ID 和机器人权限。'),
                 ephemeral: true,
             });
             return;
