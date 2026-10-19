@@ -528,7 +528,7 @@ class BotManagerApp:
         else:
             self._set_text(
                 self.env_text,
-                "TOKEN=\nCLIENT_ID=\nTICKET_CATEGORY_ID=\nSTAFF_ROLE_ID=\nSTATUS_CHANNEL_ID=\n",
+                "TOKEN=\nCLIENT_ID=\nTICKET_PANEL_CHANNEL_ID=\nTICKET_CATEGORY_ID=\nSTAFF_ROLE_ID=\nSTATUS_CHANNEL_ID=\n",
             )
 
     def load_env_example(self):
@@ -552,6 +552,8 @@ class BotManagerApp:
             "3. Railway 已连接该仓库时会自动重新部署\n"
             "4. 线上机器人重启后读取 data/*.json；也可用 Discord /reload-data（管理员）\n\n"
             "本地调试：先配置 .env，再「本地启动机器人」。\n"
+            "工单：Railway 设置 TICKET_PANEL_CHANNEL_ID 为购票文字频道。\n"
+            "启动后在该频道更新开票面板，并在其下创建私密帖。TICKET_CATEGORY_ID 已弃用。\n"
             "虚拟货币地址已从代码中删除，请勿再添加。"
         )
         self._label(wrap, text=help_text, justify="left").pack(anchor="w", pady=8)
