@@ -295,6 +295,36 @@ async function sendTicketWelcome(ticketChannel, user, product) {
             roles: staffRoleId ? [staffRoleId] : [],
         },
     });
+
+    // Thread tickets never hit the legacy first-message price list. Send it once on open.
+    try {
+        await sendProductPriceList(ticketChannel);
+    } catch (err) {
+        console.error('Failed to send product price list in new ticket:', err);
+    }
+}
+
+function buildProductPriceListEmbed() {
+    let productList = '';
+    products.forEach((p) => {
+        productList += `**${p.name}** — ${p.price}\n${p.desc}\n\n`;
+    });
+
+    return new EmbedBuilder()
+        .setTitle(`${BRAND_NAME} Product Price List`)
+        .setDescription(productList || 'No products configured.')
+        .setImage(PRODUCT_IMAGE_URL)
+        .setColor('#ef4444')
+        .setFooter({ text: 'Staff will assist you with the next steps.' });
+}
+
+async function sendProductPriceList(channel) {
+    refreshDataFromDisk();
+    await channel.send({
+        embeds: [buildProductPriceListEmbed()],
+        files: [getProductImageAttachment()],
+    });
+    console.log(`Sent product price list in ${channel.name || channel.id}`);
 }
 
 async function fetchTicketChannel(guild, channelId) {
@@ -776,8 +806,8 @@ async function inviteMentionedUsers(message) {
     }
 }
 
-// Legacy ticket text channels: first user message gets the product list.
-// New tickets are threads and already receive a welcome embed.
+// Legacy text-channel tickets: the first user message gets the price list.
+// Thread tickets already receive it from sendTicketWelcome, so this returns early for them.
 client.on('messageCreate', async (message) => {
     if (!message.author || message.author.bot || message.author.id === client.user?.id) return;
     if (message.system) return;
@@ -801,28 +831,12 @@ client.on('messageCreate', async (message) => {
     if (!isTicketChannel) return;
 
     try {
-        refreshDataFromDisk();
         const fetchedMessages = await message.channel.messages.fetch({ limit: 10 });
         const userMessages = fetchedMessages.filter((m) => !m.author.bot);
 
         if (userMessages.size !== 1) return;
 
-        let productList = '';
-        products.forEach((p) => {
-            productList += `**${p.name}** — ${p.price}\n${p.desc}\n\n`;
-        });
-
-        const priceEmbed = new EmbedBuilder()
-            .setTitle(`${BRAND_NAME} Product Price List`)
-            .setDescription(productList || 'No products configured.')
-            .setImage(PRODUCT_IMAGE_URL)
-            .setColor('#ef4444')
-            .setFooter({ text: 'Staff will assist you with the next steps.' });
-
-        const image = getProductImageAttachment();
-
-        await message.channel.send({ embeds: [priceEmbed], files: [image] });
-        console.log(`Sent product info in ticket: ${channelName}`);
+        await sendProductPriceList(message.channel);
     } catch (error) {
         console.error('Failed to send product info:', error);
     }
