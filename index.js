@@ -19,6 +19,7 @@ const {
     Events,
 } = require('discord.js');
 const Database = require('better-sqlite3');
+const { createAutoReply, pairIsMemorable, productHintFromThread } = require('./autoReply');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -153,6 +154,8 @@ try {
 } catch {
     // column already present
 }
+
+const autoReply = createAutoReply(db);
 
 function getProductImageAttachment() {
     return new AttachmentBuilder(PRODUCT_IMAGE_PATH, { name: PRODUCT_IMAGE_NAME });
@@ -806,8 +809,102 @@ async function inviteMentionedUsers(message) {
     }
 }
 
+function messageText(message) {
+    return String(message?.content || '').trim();
+}
+
+async function messageAuthorIsStaff(message) {
+    if (!message?.author) return false;
+    if (
+        autoReply.isListedStaff(message.author.username) ||
+        autoReply.isListedStaff(message.author.globalName)
+    ) {
+        return true;
+    }
+    if (!message.guild || !STAFF_ROLE_ID || STAFF_ROLE_ID === message.guild.id) return false;
+
+    let member = message.member;
+    if (!member) {
+        member = await message.guild.members.fetch(message.author.id).catch(() => null);
+    }
+    return Boolean(member?.roles?.cache?.has(STAFF_ROLE_ID));
+}
+
+async function learnFromStaffMessage(message) {
+    const staffText = messageText(message);
+    if (!staffText) return;
+
+    const history = await message.channel.messages.fetch({ limit: 25 }).catch(() => null);
+    if (!history) return;
+
+    const ordered = [...history.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+    for (const prior of ordered) {
+        if (prior.id === message.id) continue;
+        if (prior.createdTimestamp > message.createdTimestamp) continue;
+        if (message.createdTimestamp - prior.createdTimestamp > autoReply.config.learnWindowMs) break;
+        if (!prior.author || prior.author.bot || prior.system) continue;
+        if (prior.author.id === message.author.id) continue;
+        if (await messageAuthorIsStaff(prior)) return;
+
+        const customerText = messageText(prior);
+        if (!pairIsMemorable(customerText, staffText)) return;
+
+        const row = latestTicketRow(message.channel.id);
+        const inserted = autoReply.remember({
+            ticketId: message.channel.id,
+            productHint:
+                row?.product_name ||
+                productHintFromThread(message.channel.name, prior.author?.username),
+            customerText,
+            staffText,
+            staffUser: message.author.username,
+            source: 'live',
+        });
+        if (inserted) {
+            console.log(`[auto-reply] learned ticket=${message.channel.id}`);
+        }
+        return;
+    }
+}
+
+async function handlePurchaseTicketAutoReply(message) {
+    if (!autoReply.config.enabled) return;
+    const channel = message.channel;
+    if (!channel?.isThread?.() || !isActiveTicketChannel(channel)) return;
+
+    if (await messageAuthorIsStaff(message)) {
+        await learnFromStaffMessage(message);
+        return;
+    }
+
+    const row = latestTicketRow(channel.id);
+    const decision = autoReply.decide({
+        ticketId: channel.id,
+        userId: message.author.id,
+        content: message.content || '',
+        productLabel: row?.product_name || '',
+        productHint: row?.product_name || channel.name || '',
+        hasAttachments: (message.attachments?.size || 0) > 0,
+    });
+    if (!decision.shouldReply) return;
+
+    autoReply.markSent(channel.id, message.author.id, decision.category);
+    try {
+        await message.reply({
+            content: decision.text,
+            allowedMentions: { parse: [], repliedUser: true },
+        });
+    } catch (error) {
+        autoReply.clearSent(channel.id, message.author.id);
+        throw error;
+    }
+    const categoryBit = decision.category ? ` category=${decision.category}` : '';
+    console.log(`[auto-reply] ticket=${channel.id} reason=${decision.reason}${categoryBit}`);
+}
+
 // Legacy text-channel tickets: the first user message gets the price list.
-// Thread tickets already receive it from sendTicketWelcome, so this returns early for them.
+// Thread tickets already receive it from sendTicketWelcome, so this returns early for them
+// after auto-reply. Auto-reply only runs for active purchase threads.
 client.on('messageCreate', async (message) => {
     if (!message.author || message.author.bot || message.author.id === client.user?.id) return;
     if (message.system) return;
@@ -818,7 +915,14 @@ client.on('messageCreate', async (message) => {
         console.error('Mention invite failed:', error);
     }
 
-    if (message.channel?.isThread?.()) return;
+    if (message.channel?.isThread?.()) {
+        try {
+            await handlePurchaseTicketAutoReply(message);
+        } catch (error) {
+            console.error('Auto-reply failed:', error);
+        }
+        return;
+    }
     if (TICKET_PANEL_CHANNEL_ID && message.channel?.id === TICKET_PANEL_CHANNEL_ID) return;
 
     const channelName = message.channel?.name || '';
@@ -1166,6 +1270,17 @@ async function registerCommands() {
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot is online: ${client.user.tag}`);
     console.log(`Loaded ${products.length} products from data/products.json`);
+    const seeded = autoReply.seedFromFile();
+    if (autoReply.config.enabled) {
+        const clampNote = autoReply.config.cooldownClamped
+            ? ' (AUTO_REPLY_COOLDOWN_SECONDS clamped to 45-90)'
+            : '';
+        console.log(
+            `[auto-reply] enabled cooldown=${autoReply.config.cooldownSeconds}s${clampNote} learnWindow=${Math.round(autoReply.config.learnWindowMs / 1000)}s seeded=${seeded.inserted} already=${seeded.skipped}`
+        );
+    } else {
+        console.log('[auto-reply] disabled (set AUTO_REPLY_ENABLED=true)');
+    }
     console.log(`TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID || '(not set)'}`);
     if (TICKET_CATEGORY_ID) {
         console.log(
