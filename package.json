@@ -4,7 +4,8 @@
   "description": "RED DMA Sales Bot with Ticket System (no crypto payment auto-send)",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test autoReply.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",

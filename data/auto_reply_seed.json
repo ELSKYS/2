@@ -1,0 +1,26 @@
+[
+  {
+    "thread": "purchase-trigger0ms-hidden-6-months",
+    "customer": "trigger0ms",
+    "customer_text": "i restart and make this or",
+    "staff": "rrsky3461",
+    "staff_text": "yes restart pc",
+    "product_hint": "hidden 6 months"
+  },
+  {
+    "thread": "purchase-eventvwr-gg-hidden-6-months",
+    "customer": "eventvwr.gg",
+    "customer_text": "Ta dando failed",
+    "staff": "rrsky3461",
+    "staff_text": "use dma card other port",
+    "product_hint": "hidden 6 months"
+  },
+  {
+    "thread": "purchase-eventvwr-gg-hidden-6-months",
+    "customer": "eventvwr.gg",
+    "customer_text": "and with SVM MODE also?",
+    "staff": "rrsky3461",
+    "staff_text": "You can keep bios as the default mode.",
+    "product_hint": "hidden 6 months"
+  }
+]
