@@ -20,6 +20,15 @@ const {
 } = require('discord.js');
 const Database = require('better-sqlite3');
 const { createAutoReply, pairIsMemorable, productHintFromThread } = require('./autoReply');
+const {
+    readGrokConfig,
+    webhookProblem,
+    buildGrokPayload,
+    chooseTicketReplyMode,
+    postGrokWebhook,
+    safeFailureReason,
+    ticketMetadata,
+} = require('./grokAi');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -156,6 +165,7 @@ try {
 }
 
 const autoReply = createAutoReply(db);
+const grokAi = readGrokConfig();
 
 function getProductImageAttachment() {
     return new AttachmentBuilder(PRODUCT_IMAGE_PATH, { name: PRODUCT_IMAGE_NAME });
@@ -867,25 +877,122 @@ async function learnFromStaffMessage(message) {
     }
 }
 
-async function handlePurchaseTicketAutoReply(message) {
-    if (!autoReply.config.enabled) return;
+function customerTicketContext(message) {
     const channel = message.channel;
-    if (!channel?.isThread?.() || !isActiveTicketChannel(channel)) return;
+    const row = latestTicketRow(channel.id);
+    return {
+        row,
+        input: {
+            ticketId: channel.id,
+            userId: message.author.id,
+            content: message.content || '',
+            productLabel: row?.product_name || '',
+            productHint: row?.product_name || channel.name || '',
+            hasAttachments: (message.attachments?.size || 0) > 0,
+        },
+    };
+}
 
-    if (await messageAuthorIsStaff(message)) {
-        await learnFromStaffMessage(message);
+async function recentTicketMessages(channel) {
+    const history = await channel.messages.fetch({ limit: 25 }).catch(() => null);
+    if (!history) return [];
+    return [...history.values()]
+        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+        .map((entry) => ({
+            messageId: entry.id,
+            authorId: entry.author?.id || '',
+            authorUsername: entry.author?.username || '',
+            content: entry.content || '',
+            authorBot: Boolean(entry.author?.bot),
+            system: Boolean(entry.system),
+            hasAttachments: (entry.attachments?.size || 0) > 0,
+        }));
+}
+
+function forwardTicketToGrok(message) {
+    const channel = message.channel;
+    const { row, input } = customerTicketContext(message);
+    const decision = autoReply.decide(input);
+    if (!decision.shouldReply) {
+        if (decision.reason === 'cooldown') {
+            console.log(`[grok-ai] skipped ticket=${channel.id} reason=cooldown`);
+        }
         return;
     }
 
-    const row = latestTicketRow(channel.id);
-    const decision = autoReply.decide({
-        ticketId: channel.id,
-        userId: message.author.id,
+    const problem = webhookProblem(grokAi);
+    if (problem) {
+        console.warn(`[grok-ai] not forwarded ticket=${channel.id} reason=${problem}`);
+        return;
+    }
+
+    autoReply.markSent(channel.id, message.author.id, decision.category);
+    const snapshot = {
+        channelId: channel.id,
+        messageId: message.id,
         content: message.content || '',
-        productLabel: row?.product_name || '',
-        productHint: row?.product_name || channel.name || '',
-        hasAttachments: (message.attachments?.size || 0) > 0,
+        authorUsername: message.author?.username || '',
+        authorId: message.author?.id || '',
+        guildId: message.guild?.id || channel.guild?.id || null,
+        productName: row?.product_name || null,
+        productId: row?.product_id ?? null,
+        threadName: channel.name || null,
+        hasAttachments: input.hasAttachments,
+        ticket: ticketMetadata(row),
+    };
+    void deliverGrokForward(channel, snapshot);
+}
+
+async function deliverGrokForward(channel, snapshot) {
+    try {
+        const recentMessages = await recentTicketMessages(channel);
+        const payload = buildGrokPayload({ ...snapshot, recentMessages });
+        const result = await postGrokWebhook({
+            url: grokAi.webhookUrl,
+            key: grokAi.webhookKey,
+            payload,
+        });
+        if (!result.ok) {
+            autoReply.clearSent(snapshot.channelId, snapshot.authorId);
+            console.warn(
+                `[grok-ai] not forwarded ticket=${snapshot.channelId} reason=HTTP ${result.status}`
+            );
+            return;
+        }
+        console.log(`[grok-ai] forwarded ticket=${snapshot.channelId}`);
+    } catch (err) {
+        autoReply.clearSent(snapshot.channelId, snapshot.authorId);
+        console.warn(
+            `[grok-ai] not forwarded ticket=${snapshot.channelId} reason=${safeFailureReason(err, grokAi)}`
+        );
+    }
+}
+
+async function handlePurchaseTicketAutoReply(message) {
+    const channel = message.channel;
+    if (!channel?.isThread?.() || !isActiveTicketChannel(channel)) return;
+    if (!grokAi.enabled && !autoReply.config.enabled) return;
+
+    const mode = chooseTicketReplyMode({
+        grokEnabled: grokAi.enabled,
+        autoReplyEnabled: autoReply.config.enabled,
+        authorIsStaff: await messageAuthorIsStaff(message),
+        authorIsBot: Boolean(message.author?.bot),
+        isActiveTicket: true,
     });
+
+    if (mode === 'learn') {
+        await learnFromStaffMessage(message);
+        return;
+    }
+    if (mode === 'ignore') return;
+    if (mode === 'grok') {
+        forwardTicketToGrok(message);
+        return;
+    }
+
+    const { input } = customerTicketContext(message);
+    const decision = autoReply.decide(input);
     if (!decision.shouldReply) return;
 
     autoReply.markSent(channel.id, message.author.id, decision.category);
@@ -903,8 +1010,9 @@ async function handlePurchaseTicketAutoReply(message) {
 }
 
 // Legacy text-channel tickets: the first user message gets the price list.
-// Thread tickets already receive it from sendTicketWelcome, so this returns early for them
-// after auto-reply. Auto-reply only runs for active purchase threads.
+// Thread tickets already receive the price list from sendTicketWelcome, so this returns
+// early for them after mention invites. Grok forwarding or local auto-reply runs only
+// for active purchase threads, on this same gateway.
 client.on('messageCreate', async (message) => {
     if (!message.author || message.author.bot || message.author.id === client.user?.id) return;
     if (message.system) return;
@@ -1280,6 +1388,18 @@ client.once(Events.ClientReady, async () => {
         );
     } else {
         console.log('[auto-reply] disabled (set AUTO_REPLY_ENABLED=true)');
+    }
+    if (grokAi.enabled) {
+        const problem = webhookProblem(grokAi);
+        if (problem) {
+            console.warn(`[grok-ai] enabled but not forwarding: ${problem}`);
+        } else {
+            console.log(
+                '[grok-ai] enabled; customer ticket messages forward to Grok Bot (local FAQ auto-reply skipped)'
+            );
+        }
+    } else {
+        console.log('[grok-ai] disabled (set GROK_BOT_AI_ENABLED=true)');
     }
     console.log(`TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID || '(not set)'}`);
     if (TICKET_CATEGORY_ID) {
