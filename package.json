@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test autoReply.test.js"
+    "test": "node --test autoReply.test.js grokAi.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",
