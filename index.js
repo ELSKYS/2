@@ -25,6 +25,11 @@ const {
     webhookProblem,
     buildGrokPayload,
     chooseTicketReplyMode,
+    readStaffQuietMs,
+    shouldNoteStaffReply,
+    staffQuietSkipLine,
+    createStaffQuietTracker,
+    bindStaffQuietStore,
     postGrokWebhook,
     safeFailureReason,
     ticketMetadata,
@@ -166,6 +171,15 @@ try {
 
 const autoReply = createAutoReply(db);
 const grokAi = readGrokConfig();
+const staffQuietMs = readStaffQuietMs();
+const staffQuietStore = bindStaffQuietStore(db);
+staffQuietStore.sweep(Date.now(), staffQuietMs);
+const staffQuiet = createStaffQuietTracker({
+    quietMs: staffQuietMs,
+    load: staffQuietStore.load,
+    save: staffQuietStore.save,
+    remove: staffQuietStore.remove,
+});
 
 function getProductImageAttachment() {
     return new AttachmentBuilder(PRODUCT_IMAGE_PATH, { name: PRODUCT_IMAGE_NAME });
@@ -909,8 +923,17 @@ async function recentTicketMessages(channel) {
         }));
 }
 
+function messageStamp(message) {
+    const at = Number(message?.createdTimestamp);
+    return Number.isFinite(at) && at > 0 ? at : Date.now();
+}
+
 function forwardTicketToGrok(message) {
     const channel = message.channel;
+    if (staffQuiet.isQuiet(channel.id, messageStamp(message))) {
+        console.log(staffQuietSkipLine('[grok-ai]', channel.id));
+        return;
+    }
     const { row, input } = customerTicketContext(message);
     const decision = autoReply.decide(input);
     if (!decision.shouldReply) {
@@ -973,12 +996,21 @@ async function handlePurchaseTicketAutoReply(message) {
     if (!channel?.isThread?.() || !isActiveTicketChannel(channel)) return;
     if (!grokAi.enabled && !autoReply.config.enabled) return;
 
+    const authorIsStaff = await messageAuthorIsStaff(message);
+    const authorIsBot = Boolean(message.author?.bot);
+    const at = messageStamp(message);
+    // Filler staff text (hi/ok/sure) is not learned, but it still opens the quiet window.
+    if (shouldNoteStaffReply({ authorIsStaff, authorIsBot, isActiveTicket: true })) {
+        staffQuiet.noteStaffReply(channel.id, at);
+    }
+
     const mode = chooseTicketReplyMode({
         grokEnabled: grokAi.enabled,
         autoReplyEnabled: autoReply.config.enabled,
-        authorIsStaff: await messageAuthorIsStaff(message),
-        authorIsBot: Boolean(message.author?.bot),
+        authorIsStaff,
+        authorIsBot,
         isActiveTicket: true,
+        staffQuiet: staffQuiet.isQuiet(channel.id, at),
     });
 
     if (mode === 'learn') {
@@ -986,6 +1018,10 @@ async function handlePurchaseTicketAutoReply(message) {
         return;
     }
     if (mode === 'ignore') return;
+    if (mode === 'staff-quiet') {
+        console.log(staffQuietSkipLine(grokAi.enabled ? '[grok-ai]' : '[auto-reply]', channel.id));
+        return;
+    }
     if (mode === 'grok') {
         forwardTicketToGrok(message);
         return;
@@ -1012,7 +1048,8 @@ async function handlePurchaseTicketAutoReply(message) {
 // Legacy text-channel tickets: the first user message gets the price list.
 // Thread tickets already receive the price list from sendTicketWelcome, so this returns
 // early for them after mention invites. Grok forwarding or local auto-reply runs only
-// for active purchase threads, on this same gateway.
+// for active purchase threads, on this same gateway. A human staff reply pauses both
+// for STAFF_QUIET_SECONDS (default 1 hour).
 client.on('messageCreate', async (message) => {
     if (!message.author || message.author.bot || message.author.id === client.user?.id) return;
     if (message.system) return;
@@ -1400,6 +1437,14 @@ client.once(Events.ClientReady, async () => {
         }
     } else {
         console.log('[grok-ai] disabled (set GROK_BOT_AI_ENABLED=true)');
+    }
+    if (grokAi.enabled || autoReply.config.enabled) {
+        const quietSeconds = Math.round(staffQuietMs / 1000);
+        console.log(
+            quietSeconds > 0
+                ? `[ticket] staff quiet window=${quietSeconds}s`
+                : '[ticket] staff quiet window disabled (STAFF_QUIET_SECONDS=0)'
+        );
     }
     console.log(`TICKET_PANEL_CHANNEL_ID=${TICKET_PANEL_CHANNEL_ID || '(not set)'}`);
     if (TICKET_CATEGORY_ID) {
