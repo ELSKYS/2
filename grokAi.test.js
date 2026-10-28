@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { createAutoReply } = require('./autoReply');
+const { isLowValueStaffReply, pairIsMemorable } = require('./autoReply');
 const {
     CONTENT_MAX,
     RECENT_LIMIT,
@@ -17,6 +18,12 @@ const {
     safeFailureReason,
     ticketMetadata,
     webhookProblem,
+    DEFAULT_STAFF_QUIET_SECONDS,
+    readStaffQuietMs,
+    shouldNoteStaffReply,
+    staffQuietSkipLine,
+    createStaffQuietTracker,
+    bindStaffQuietStore,
 } = require('./grokAi');
 
 test('Grok forwarding is off unless the enable flag is explicitly on', () => {
@@ -143,6 +150,155 @@ test('staff, bots, and inactive tickets are never forwarded', () => {
         'auto-reply'
     );
     assert.equal(chooseTicketReplyMode({ isActiveTicket: true }), 'ignore');
+    assert.equal(chooseTicketReplyMode({ ...base, staffQuiet: true }), 'staff-quiet');
+    assert.equal(
+        chooseTicketReplyMode({
+            grokEnabled: false,
+            autoReplyEnabled: true,
+            isActiveTicket: true,
+            staffQuiet: true,
+        }),
+        'staff-quiet'
+    );
+    assert.equal(chooseTicketReplyMode({ ...base, staffQuiet: true, authorIsStaff: true }), 'learn');
+    assert.equal(
+        chooseTicketReplyMode({ ...base, autoReplyEnabled: false, authorIsStaff: true, staffQuiet: true }),
+        'ignore'
+    );
+    assert.equal(chooseTicketReplyMode({ isActiveTicket: true, staffQuiet: true }), 'ignore');
+});
+
+test('staff quiet window defaults to one hour and can be overridden', () => {
+    assert.equal(DEFAULT_STAFF_QUIET_SECONDS, 3600);
+    assert.equal(readStaffQuietMs({}), 3_600_000);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: '' }), 3_600_000);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: '1800' }), 1_800_000);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: ' 7200 ' }), 7_200_000);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: '0' }), 0);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: '-5' }), 3_600_000);
+    assert.equal(readStaffQuietMs({ STAFF_QUIET_SECONDS: 'nope' }), 3_600_000);
+});
+
+test('filler staff replies open a one-hour quiet window without blocking learning', () => {
+    for (const filler of ['hi', 'ok', 'sure']) {
+        assert.equal(isLowValueStaffReply(filler), true);
+        assert.equal(pairIsMemorable('does this work with my cpu?', filler), false);
+    }
+    assert.equal(shouldNoteStaffReply({ authorIsStaff: true, isActiveTicket: true }), true);
+    assert.equal(shouldNoteStaffReply({ authorIsStaff: true, authorIsBot: true, isActiveTicket: true }), false);
+    assert.equal(shouldNoteStaffReply({ authorIsStaff: false, isActiveTicket: true }), false);
+    assert.equal(shouldNoteStaffReply({ authorIsStaff: true, isActiveTicket: false }), false);
+
+    const quietMs = 3_600_000;
+    const staffAt = 5_000_000;
+    const tracker = createStaffQuietTracker({ quietMs });
+    tracker.noteStaffReply('ticket-1', staffAt);
+    tracker.noteStaffReply('ticket-1', staffAt);
+
+    const during = staffAt + quietMs - 1;
+    assert.equal(tracker.isQuiet('ticket-1', during), true);
+    assert.equal(tracker.isQuiet('ticket-2', during), false);
+    assert.equal(
+        chooseTicketReplyMode({
+            grokEnabled: true,
+            autoReplyEnabled: true,
+            isActiveTicket: true,
+            staffQuiet: true,
+        }),
+        'staff-quiet'
+    );
+    assert.equal(
+        chooseTicketReplyMode({
+            grokEnabled: true,
+            autoReplyEnabled: true,
+            isActiveTicket: true,
+            authorIsStaff: true,
+            staffQuiet: true,
+        }),
+        'learn'
+    );
+
+    const extendedAt = staffAt + 30 * 60 * 1000;
+    tracker.noteStaffReply('ticket-1', extendedAt);
+    assert.equal(tracker.isQuiet('ticket-1', extendedAt + quietMs - 1), true);
+
+    const expired = createStaffQuietTracker({ quietMs });
+    expired.noteStaffReply('ticket-1', staffAt);
+    assert.equal(expired.isQuiet('ticket-1', staffAt + quietMs), false);
+    assert.equal(expired.isQuiet('ticket-1', staffAt + quietMs + 1), false);
+
+    const disabled = createStaffQuietTracker({ quietMs: 0 });
+    disabled.noteStaffReply('ticket-1', staffAt);
+    assert.equal(disabled.isQuiet('ticket-1', staffAt + 1), false);
+
+    assert.equal(
+        staffQuietSkipLine('[grok-ai]', 'ticket-1'),
+        '[grok-ai] skipped ticket=ticket-1 reason=staff-quiet-1h'
+    );
+    assert.equal(
+        staffQuietSkipLine('[auto-reply]', 'ticket-9'),
+        '[auto-reply] skipped ticket=ticket-9 reason=staff-quiet-1h'
+    );
+});
+
+test('staff quiet timestamps survive a restart via bot_kv', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE bot_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    db.prepare('INSERT INTO bot_kv (key, value) VALUES (?, ?)').run('ticket_panel:1', 'keep-me');
+    const quietMs = 3_600_000;
+    const staffAt = 8_000_000;
+    const store = bindStaffQuietStore(db);
+    store.save('old-ticket', staffAt - quietMs);
+    store.save('fresh-ticket', staffAt);
+
+    const running = createStaffQuietTracker({
+        quietMs,
+        load: store.load,
+        save: store.save,
+        remove: store.remove,
+    });
+    running.noteStaffReply('fresh-ticket', staffAt);
+    assert.equal(store.load('fresh-ticket'), staffAt);
+
+    store.sweep(staffAt, quietMs);
+    assert.equal(store.load('old-ticket'), null);
+    assert.equal(store.load('fresh-ticket'), staffAt);
+    assert.equal(db.prepare('SELECT value FROM bot_kv WHERE key = ?').get('ticket_panel:1').value, 'keep-me');
+
+    const restarted = createStaffQuietTracker({
+        quietMs,
+        load: store.load,
+        save: store.save,
+        remove: store.remove,
+    });
+    assert.equal(restarted.isQuiet('fresh-ticket', staffAt + quietMs - 1), true);
+    assert.equal(restarted.isQuiet('fresh-ticket', staffAt + quietMs), false);
+    assert.equal(store.load('fresh-ticket'), null);
+
+    const broken = createStaffQuietTracker({
+        quietMs,
+        save() {
+            throw new Error('disk full');
+        },
+    });
+    assert.doesNotThrow(() => broken.noteStaffReply('ticket-3', staffAt));
+    assert.equal(broken.isQuiet('ticket-3', staffAt + 1_000), true);
+
+    const missing = createStaffQuietTracker({
+        quietMs,
+        load: store.load,
+        save: store.save,
+        remove: store.remove,
+    });
+    assert.equal(missing.isQuiet('missing-ticket', 1_000), false);
+    assert.equal(store.load('missing-ticket'), null);
+
+    const cleared = bindStaffQuietStore(db);
+    cleared.save('fresh-ticket', staffAt);
+    cleared.sweep(staffAt, 0);
+    assert.equal(cleared.load('fresh-ticket'), null);
+    assert.equal(db.prepare('SELECT value FROM bot_kv WHERE key = ?').get('ticket_panel:1').value, 'keep-me');
+    db.close();
 });
 
 test('forward plan reuses the per-user ticket cooldown and FAQ bypass', () => {
@@ -285,9 +441,30 @@ test('the thread handler forwards after mention invites and keeps one gateway', 
     assert.match(forwardFn, /autoReply\.markSent\(/);
 
     const learnAt = fn.indexOf("mode === 'learn'");
+    const quietAt = fn.indexOf("mode === 'staff-quiet'");
     const grokAt = fn.indexOf("mode === 'grok'");
     const replyAt = fn.indexOf('message.reply(');
-    assert.ok(learnAt > 0 && grokAt > learnAt && replyAt > grokAt);
+    assert.ok(learnAt > 0 && quietAt > learnAt && grokAt > quietAt && replyAt > grokAt);
+    assert.match(fn.slice(quietAt, grokAt), /return;/);
     assert.match(fn.slice(grokAt, replyAt), /return;/);
     assert.match(source, /\[grok-ai\] forwarded ticket=/);
+    assert.match(source, /staffQuietSkipLine\(/);
+    const grokSource = fs.readFileSync(path.join(__dirname, 'grokAi.js'), 'utf8');
+    assert.match(grokSource, /reason=staff-quiet-1h/);
+
+    const noteAt = fn.indexOf('noteStaffReply(');
+    const learnCallAt = fn.indexOf('learnFromStaffMessage(message)');
+    assert.ok(noteAt > 0 && learnCallAt > noteAt);
+    assert.match(fn.slice(0, noteAt), /shouldNoteStaffReply\(/);
+    const learnFnEnd = source.indexOf('function customerTicketContext');
+    const learnFn = source.slice(source.indexOf('async function learnFromStaffMessage'), learnFnEnd);
+    assert.equal(learnFn.includes('noteStaffReply'), false);
+    assert.match(learnFn, /pairIsMemorable/);
+
+    const forwardFnQuiet = forwardFn.indexOf('staffQuiet.isQuiet(');
+    const decideAt = forwardFn.indexOf('autoReply.decide(');
+    assert.ok(forwardFnQuiet > 0 && decideAt > forwardFnQuiet);
+    assert.equal((source.match(/new Client\(/g) || []).length, 1);
+    assert.equal((source.match(/\.login\(/g) || []).length, 1);
+    assert.equal((source.match(/process\.env\.TOKEN/g) || []).length, 1);
 });
